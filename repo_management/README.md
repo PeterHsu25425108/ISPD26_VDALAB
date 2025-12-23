@@ -6,7 +6,8 @@ Updates the repository with the latest contest information from https://github.c
 
 **Usage:**
 ```bash
-bash update_repo.sh [pull|fetch]
+# Perform pull if no args are given.
+bash repo_management/update_repo.sh [pull|fetch]
 ```
 - `pull` - Update local files directly
 - `fetch` - Download updates without applying
