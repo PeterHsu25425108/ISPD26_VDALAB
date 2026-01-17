@@ -1,4 +1,4 @@
-export TOP_PROJ_DIR="/ISPD26-Contest"
+export TOP_PROJ_DIR="/workspace/ISPD26-Contest"
 export PROJ_DIR="${TOP_PROJ_DIR}/scripts"
 
 export DESIGN_NAME="jpeg_encoder"
