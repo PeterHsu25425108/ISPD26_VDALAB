@@ -9,7 +9,7 @@ import glob
 from glob import glob
 
 # Usage: 
-# openroad -python {The relative directory to src/unittest}/openroad.py <input_dir> <platform_dir> <output_dir> <top_module>
+# openroad -exit(add this flag to terminate the python shell after running the script) -python {The relative directory to src/unittest}/openroad.py <input_dir> <platform_dir> <output_dir> <top_module>
 
 input_dir = sys.argv[1]
 platform_dir = sys.argv[2]
@@ -106,7 +106,7 @@ print("WNS: ", wns)
 design.evalTclString(f"report_checks -path_delay max -format json -group_path_count 10 -unique_paths_to_endpoint -slack_max {wns * 0.6} -slack_min {wns} > tmp.json")
 with open("tmp.json", "r") as f:
     path_report = json.load(f)
-# os.remove("tmp.json")
+os.remove("tmp.json")
 
 print("processing path report...")
 # print path report
