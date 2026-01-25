@@ -90,6 +90,126 @@ design.evalTclString("set_units -power mW")
 
 # Dependency: tech -> design -> timing
 timing = Timing(design)
+
+# ============================================================================
+# SUBGRAPH CONSTRUCTION FROM WORST SLACK PATH
+# ============================================================================
+# This section constructs a subgraph containing:
+# - Set W: All instances on the design's worst slack path
+# - Set D: All instances driven by instances in W (fanout cone)
+# The subgraph = W ∪ D
+# ============================================================================
+
+# Get worst slack and report it
+wns = float(design.evalTclString("worst_slack -max"))
+print(f"\nWorst Negative Slack: {wns}")
+
+# Use report_checks to get path details  
+design.evalTclString(f"report_checks -path_delay max -format full_clock_expanded -endpoint_path_count 1 > /tmp/worst_path.txt")
+
+# Parse the path report to extract instance names
+W_inst_names = set()
+try:
+    with open("/tmp/worst_path.txt", "r") as f:
+        lines = f.readlines()
+        in_path_section = False
+        for line in lines:
+            stripped = line.strip()
+            
+            # Identify path section
+            if 'Delay' in line and 'Time' in line and 'Description' in line:
+                in_path_section = True
+                continue
+            if stripped.startswith('----') and in_path_section:
+                continue
+            if 'slack' in stripped.lower():
+                in_path_section = False
+                continue
+            
+            if in_path_section and stripped:
+                # Lines with timing info have format: "delay time ^ inst/pin (cell)"
+                # We need to extract instance name from "inst/pin"
+                if '(' in line and ')' in line:
+                    # Find the part before opening parenthesis
+                    parts = line.split('(')
+                    if len(parts) >= 2:
+                        before_paren = parts[0].strip()
+                        # The last token should be "instance/pin" or just "pin"
+                        tokens = before_paren.split()
+                        if len(tokens) >= 1:
+                            pin_path = tokens[-1]  # Last token is the pin path
+                            # Extract instance name (everything before the last "/")
+                            if '/' in pin_path:
+                                inst_name = '/'.join(pin_path.split('/')[:-1])
+                                if inst_name and inst_name not in ['input', 'output']:
+                                    W_inst_names.add(inst_name)
+                        
+except Exception as e:
+    print(f"Error parsing path report: {e}")
+    import traceback
+    traceback.print_exc()
+
+print(f"\nParsed {len(W_inst_names)} unique instance names from path report")
+
+# Convert names to instance objects
+W = set()
+block = design.getBlock()
+not_found = []
+for name in W_inst_names:
+    # Try direct lookup
+    inst = block.findInst(name)
+    if inst:
+        W.add(inst)
+    else:
+        # Try with backslash escaping
+        escaped_name = name.replace('/', '\\/')
+        inst = block.findInst(escaped_name)
+        if inst:
+            W.add(inst)
+        else:
+            not_found.append(name)
+
+if not_found:
+    print(f"Warning: {len(not_found)} instances not found in design")
+    print(f"Sample not found: {not_found[:5]}")
+
+print(f"\nSet W has {len(W)} instances on worst path:")
+for inst in sorted(list(W), key=lambda x: x.getName())[:20]:
+    print(f"  {inst.getName()}")
+if len(W) > 20:
+    print(f"  ... and {len(W) - 20} more")
+
+# Find instances driven by W (fanout)
+driven_insts = set()
+
+for inst in W:
+    # Get all output pins of the instance
+    for iterm in inst.getITerms():
+        if iterm.isOutputSignal():
+            # Get the net connected to this output
+            net = iterm.getNet()
+            if net is not None:
+                # Get all iterms connected to this net
+                for connected_iterm in net.getITerms():
+                    if connected_iterm.isInputSignal():
+                        driven_inst = connected_iterm.getInst()
+                        if driven_inst not in W:  # Don't include instances already in W
+                            driven_insts.add(driven_inst)
+
+print(f"\nInstances driven by W: {len(driven_insts)}")
+
+# Combine to get full subgraph
+subgraph_insts = W.union(driven_insts)
+print(f"Total subgraph instances (W + driven): {len(subgraph_insts)}")
+
+# Print some stats about the subgraph
+print("\nSubgraph instances (first 30):")
+for i, inst in enumerate(sorted(list(subgraph_insts), key=lambda x: x.getName())[:30]):
+    in_W = "on worst path" if inst in W else "driven by W"
+    print(f"  {inst.getName()} ({inst.getMaster().getName()}) - {in_W}")
+if len(subgraph_insts) > 30:
+    print(f"  ... and {len(subgraph_insts) - 30} more")
+
 insts = design.getBlock().getInsts()[:-10]
 
 
