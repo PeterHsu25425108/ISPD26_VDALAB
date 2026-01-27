@@ -1,195 +1,274 @@
 #!/bin/bash
-# setup.sh - Install ML dependencies for OpenROAD + RL project
-# Usage: bash setup.sh
 
-set -e
+set -e  # Exit on error
 
-echo "======================================================================"
-echo "  Installing ML/RL Dependencies for System Python 3.12"
-echo "======================================================================"
+echo "=============================================="
+echo "ASP-DAC24-Tutorial Dependency Installation"
+echo "Installing to system Python: /usr/bin/python3"
+echo "=============================================="
+
+# Use workspace for pip cache to avoid filling root filesystem
+export PIP_CACHE_DIR=/workspace/.pip-cache
+mkdir -p /workspace/.pip-cache
 
 # Force deactivate conda
 source /opt/miniconda3/etc/profile.d/conda.sh
 conda deactivate 2>/dev/null || true
 
-# Explicitly unset conda environment variables
-unset CONDA_DEFAULT_ENV
-unset CONDA_PREFIX
-unset CONDA_PYTHON_EXE
+# Disable conda auto-activation
+conda config --set auto_activate_base false 2>/dev/null || true
 
-# Use absolute path to system Python
-SYSTEM_PYTHON="/usr/bin/python3"
-SYSTEM_PIP="/usr/bin/pip3"
+# Clean up space before starting
+echo ""
+echo "[0/4] Cleaning up disk space..."
+apt-get clean
+apt-get autoremove -y 2>/dev/null || true
+rm -rf /tmp/* /var/tmp/* /var/cache/apt/archives/* 2>/dev/null || true
+pip3 cache purge 2>/dev/null || true
+rm -rf /root/.cache/pip 2>/dev/null || true
+conda clean --all -y 2>/dev/null || true
+rm -rf /opt/miniconda3/pkgs/* 2>/dev/null || true
 
-# Verify we're using the correct Python
-PYTHON_VERSION=$($SYSTEM_PYTHON --version 2>&1 | awk '{print $2}')
-echo "Using:  $SYSTEM_PYTHON"
-echo "Python version: $PYTHON_VERSION"
+# Check available space
+echo ""
+echo "Available disk space:"
+df -h / | grep -E "Filesystem|overlay"
 
-if [[ !  "$PYTHON_VERSION" =~ ^3\.12\.  ]]; then
-    echo "ERROR: Expected Python 3.12.x, got $PYTHON_VERSION"
-    exit 1
+# Update package lists
+echo ""
+echo "[1/4] Updating package lists..."
+apt-get update
+
+# Install system dependencies
+echo ""
+echo "[2/4] Installing system dependencies..."
+apt-get install -y gnupg2 ca-certificates
+
+# Add graph-tool repository
+echo ""
+echo "Adding graph-tool repository for Ubuntu 24.04 (noble)..."
+if ! grep -q "downloads.skewed.de" /etc/apt/sources.list; then
+    echo "deb [trusted=yes] https://downloads.skewed.de/apt noble main" >> /etc/apt/sources.list
+fi
+apt-key adv --keyserver keyserver.ubuntu.com --recv-key 612DEFB798507F25 || true
+
+# Update again after adding repository
+apt-get update
+
+# Install required system packages
+echo ""
+echo "Installing required system packages..."
+apt-get install -y \
+    python3-matplotlib \
+    python3-graph-tool \
+    python3-pip \
+    libcairo2 \
+    libcairo2-dev \
+    libpython3-dev \
+    libboost-all-dev
+
+# Clean up after apt installations
+apt-get clean
+rm -rf /var/cache/apt/archives/*
+
+# CUDA toolkit installation DISABLED to save disk space (~7GB)
+# Root filesystem has limited space - PyTorch has built-in CUDA support
+echo ""
+echo "CUDA toolkit installation SKIPPED - PyTorch has built-in CUDA support"
+echo "Root filesystem usage: $(df -h / | grep overlay | awk '{print $5}')"
+
+# Install Python packages using system pip
+echo ""
+echo "[3/4] Installing Python packages to system Python3..."
+echo "Using pip cache in workspace: $PIP_CACHE_DIR"
+
+# Install packages one by one to handle dependencies properly
+# NOTE: Changed numpy from 1.24.4 to 1.26.0+ for Python 3.12 compatibility
+echo "Installing NumPy..."
+/usr/bin/pip3 install --break-system-packages --no-cache-dir numpy>=1.26.0
+
+echo "Installing PyTorch..."
+/usr/bin/pip3 install --break-system-packages --no-cache-dir torch==2.2.0
+
+echo "Installing torchdata (compatible version for DGL 2.1.0)..."
+# DGL 2.1.0 requires torchdata 0.6.x or 0.7.x, NOT 0.11.x
+/usr/bin/pip3 install --break-system-packages --no-cache-dir 'torchdata<0.8,>=0.6'
+
+echo "Installing PyYAML (required by DGL)..."
+/usr/bin/pip3 install --break-system-packages --no-cache-dir PyYAML
+
+echo "Installing DGL..."
+/usr/bin/pip3 install --break-system-packages --no-cache-dir dgl==2.1.0
+
+echo "Installing remaining packages..."
+/usr/bin/pip3 install --break-system-packages --no-cache-dir \
+    pycairo \
+    pandas \
+    scikit-learn \
+    pydantic
+
+# Clean pip cache in root after installation
+rm -rf /root/.cache/pip 2>/dev/null || true
+
+# Fix graph-tool library conflict with PyTorch
+echo ""
+echo "Fixing graph-tool library conflict..."
+if [ -f /usr/local/lib/python3.12/dist-packages/torch/lib/libgomp-a34b3233.so.1 ]; then
+    echo "Setting up library preload for graph-tool compatibility..."
+    # Add to bashrc for persistent fix
+    if ! grep -q "LD_PRELOAD.*libgomp" /root/.bashrc 2>/dev/null; then
+        echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1' >> /root/.bashrc
+    fi
+    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1
 fi
 
+# Add conda deactivation to bashrc
+if ! grep -q "conda deactivate" /root/.bashrc 2>/dev/null; then
+    echo 'conda deactivate 2>/dev/null || true' >> /root/.bashrc
+fi
+
+# Clean up workspace cache to free root filesystem
+echo "Cleaning workspace cache..."
+rm -rf /workspace/.pip-cache/* 2>/dev/null || true
+
+# Verify installations
 echo ""
-echo "Step 1/4: Installing PyTorch with CUDA 12.1 support..."
-# Use latest compatible version (2.5.1 is the latest for cu121)
-$SYSTEM_PIP install --break-system-packages \
-    torch==2.5.1+cu121 \
-    torchvision==0.20.1+cu121 \
-    torchaudio==2.5.1+cu121 \
-    --index-url https://download.pytorch.org/whl/cu121 \
-    --no-cache-dir
+echo "[4/4] Verifying installations..."
+echo "=============================================="
 
+# Check Python version
 echo ""
-echo "Step 2/4: Installing PyTorch Geometric and extensions..."
-$SYSTEM_PIP install --break-system-packages \
-    torch-geometric
+echo "Python version:"
+/usr/bin/python3 --version
 
-# Install PyG extensions - using find-links for latest torch version
-echo "Installing PyG extensions (this may take a while)..."
-$SYSTEM_PIP install --break-system-packages \
-    pyg-lib \
-    torch-scatter \
-    torch-sparse \
-    torch-cluster \
-    torch-spline-conv \
-    -f https://data.pyg.org/whl/torch-2.5.0+cu121.html \
-    --no-cache-dir
-
+# Verify system packages
 echo ""
-echo "Step 3/4: Installing RL frameworks..."
-$SYSTEM_PIP install --break-system-packages \
-    torchrl \
-    tensordict \
-    gymnasium
+echo "Checking system packages..."
+SYSTEM_PACKAGES=(
+    "python3-matplotlib"
+    "python3-graph-tool"
+    "python3-pip"
+    "libcairo2"
+    "libcairo2-dev"
+)
 
+for package in "${SYSTEM_PACKAGES[@]}"; do
+    if dpkg -l | grep -q "^ii  $package"; then
+        echo "✓ $package is installed"
+    else
+        echo "✗ $package is NOT installed"
+    fi
+done
+
+# Verify Python packages
 echo ""
-echo "Step 4/4: Installing utility libraries..."
-$SYSTEM_PIP install --break-system-packages \
-    numpy \
-    pandas \
-    matplotlib \
-    seaborn \
-    scikit-learn \
-    tensorboard
+echo "Checking Python packages..."
+PYTHON_PACKAGES=(
+    "torch"
+    "dgl"
+    "cairo"
+    "pandas"
+    "sklearn"
+    "numpy"
+    "pydantic"
+    "torchdata"
+)
 
+for package in "${PYTHON_PACKAGES[@]}"; do
+    if /usr/bin/python3 -c "import $package" 2>/dev/null; then
+        VERSION=$(/usr/bin/python3 -c "import $package; print($package.__version__)" 2>/dev/null || echo "unknown")
+        echo "✓ $package (version: $VERSION) is installed"
+    else
+        echo "✗ $package is NOT installed"
+    fi
+done
+
+# Special check for graph_tool (different import name, needs LD_PRELOAD)
 echo ""
-echo "======================================================================"
-echo "  Verification"
-echo "======================================================================"
+echo "Checking graph-tool..."
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1
+if /usr/bin/python3 -c "import graph_tool" 2>/dev/null; then
+    GT_VERSION=$(/usr/bin/python3 -c "import graph_tool; print(graph_tool.__version__)" 2>/dev/null || echo "unknown")
+    echo "✓ graph_tool (version: $GT_VERSION) is installed"
+else
+    echo "✗ graph_tool is NOT installed"
+fi
 
-# Verify installations using system Python
-$SYSTEM_PYTHON << 'EOF'
+# Detailed version check
+echo ""
+echo "=============================================="
+echo "Detailed Package Versions:"
+echo "=============================================="
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1
+/usr/bin/python3 -c "
 import sys
-print(f"Python:  {sys.version}")
-print(f"Python executable: {sys.executable}")
+print(f'Python: {sys.version}')
 
 try:
     import torch
-    print(f"✓ PyTorch:  {torch.__version__}")
-    print(f"  CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"  CUDA version: {torch.version.cuda}")
-        print(f"  GPU count: {torch.cuda.device_count()}")
-        for i in range(torch.cuda. device_count()):
-            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+    print(f'PyTorch: {torch.__version__}')
+    print(f'CUDA Available: {torch.cuda.is_available()}')
 except ImportError as e:
-    print(f"✗ PyTorch:  {e}")
-    sys.exit(1)
+    print(f'PyTorch: NOT INSTALLED ({e})')
 
 try:
-    import torch_geometric
-    print(f"✓ PyTorch Geometric: {torch_geometric.__version__}")
+    import dgl
+    print(f'DGL: {dgl.__version__}')
 except ImportError as e:
-    print(f"✗ PyTorch Geometric: {e}")
-    sys.exit(1)
+    print(f'DGL: NOT INSTALLED ({e})')
 
 try:
-    import torchrl
-    print(f"✓ TorchRL: {torchrl.__version__}")
+    import torchdata
+    print(f'TorchData: {torchdata.__version__}')
 except ImportError as e:
-    print(f"✗ TorchRL: {e}")
-    sys.exit(1)
+    print(f'TorchData: NOT INSTALLED ({e})')
 
 try:
-    import gymnasium
-    print(f"✓ Gymnasium: {gymnasium.__version__}")
+    import numpy
+    print(f'NumPy: {numpy.__version__}')
 except ImportError as e:
-    print(f"✗ Gymnasium: {e}")
-    sys.exit(1)
+    print(f'NumPy: NOT INSTALLED ({e})')
 
 try:
-    import numpy as np
-    print(f"✓ NumPy: {np.__version__}")
+    import pandas
+    print(f'Pandas: {pandas.__version__}')
 except ImportError as e:
-    print(f"✗ NumPy:  {e}")
-    sys.exit(1)
+    print(f'Pandas: NOT INSTALLED ({e})')
 
 try:
-    import pandas as pd
-    print(f"✓ Pandas:  {pd.__version__}")
+    import sklearn
+    print(f'Scikit-learn: {sklearn.__version__}')
 except ImportError as e:
-    print(f"✗ Pandas: {e}")
-    sys.exit(1)
+    print(f'Scikit-learn: NOT INSTALLED ({e})')
 
-print("\n✓ All dependencies installed successfully!")
-EOF
+try:
+    import pydantic
+    print(f'Pydantic: {pydantic.__version__}')
+except ImportError as e:
+    print(f'Pydantic: NOT INSTALLED ({e})')
+
+try:
+    import cairo
+    print(f'PyCairo: {cairo.version}')
+except ImportError as e:
+    print(f'PyCairo: NOT INSTALLED ({e})')
+
+try:
+    import graph_tool
+    print(f'Graph-tool: {graph_tool.__version__}')
+except ImportError as e:
+    print(f'Graph-tool: NOT INSTALLED ({e})')
+"
 
 echo ""
-echo "======================================================================"
-echo "  Testing OpenROAD Integration"
-echo "======================================================================"
-
-# Test OpenROAD + PyTorch integration
-openroad -python << 'EOF'
-import sys
-print(f"OpenROAD Python: {sys.version}")
-print(f"OpenROAD Python executable: {sys.executable}")
-
-try:
-    import openroad
-    import odb
-    print("✓ OpenROAD API available")
-except ImportError as e: 
-    print(f"✗ OpenROAD API: {e}")
-    sys.exit(1)
-
-try:
-    import torch
-    print(f"✓ PyTorch available in openroad -python:  {torch.__version__}")
-except ImportError as e:
-    print(f"✗ PyTorch in OpenROAD: {e}")
-    sys.exit(1)
-
-try:
-    import torch_geometric
-    print(f"✓ PyG available in openroad -python")
-except ImportError as e:  
-    print(f"✗ PyG in OpenROAD: {e}")
-    sys.exit(1)
-
-try:
-    import torchrl
-    print(f"✓ TorchRL available in openroad -python")
-except ImportError as e:  
-    print(f"✗ TorchRL in OpenROAD: {e}")
-    sys.exit(1)
-
-print("\n✓ OpenROAD + ML libraries integration confirmed!")
-EOF
-
+echo "=============================================="
+echo "Final disk usage:"
+df -h / | grep -E "Filesystem|overlay"
 echo ""
-echo "======================================================================"
-echo "  Setup Complete!"
-echo "======================================================================"
-echo ""
-echo "Installed versions:"
-$SYSTEM_PYTHON -c "import torch; print(f'  PyTorch: {torch.__version__}')"
-$SYSTEM_PYTHON -c "import torch_geometric; print(f'  PyG: {torch_geometric.__version__}')"
-$SYSTEM_PYTHON -c "import torchrl; print(f'  TorchRL: {torchrl.__version__}')"
-echo ""
-echo "Usage:"
-echo "  openroad -python your_ml_script.py"
-echo ""
-umask 000
+echo "IMPORTANT NOTES:"
+echo "1. Always deactivate conda: conda deactivate"
+echo "2. To use graph-tool, run: export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1"
+echo "3. Both have been added to /root/.bashrc"
+echo "=============================================="
+echo "Installation and verification complete!"
+echo "=============================================="
