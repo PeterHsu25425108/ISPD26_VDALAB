@@ -23,9 +23,9 @@ Prof. Zhiang Wang, Fudan University [zhiangwang@fudan.edu.cn]
 - Release the second set of benchmarks (with placement blockages): Nov. 9, 2025
 - Registration Close: Nov 30, 2025
 - Release one large-scale testcase: Dec. 1, 2025
-- **Release one large-scale testcase with placement blockages; all public benchmarks are available: Dec. 3, 2025**
+- Release one large-scale testcase with placement blockages; all public benchmarks are available: Dec. 3, 2025
 - Alpha Submission Deadline: Jan 12, 2026
-- Beta Submission Deadline: Feb, 2, 2026
+- **Beta Submission Deadline: Feb, 2, 2026**
 - Final Submission Deadline: Mar, 7, 2026 (Anywhere on earth, and it is a hard deadline)
 - Results Announcement: March 18, 2026
 
@@ -77,6 +77,15 @@ Email: ispd26contest@gmail.com
 | 34   | warp_speed      | Indian Institute of Technology Madras |
 | 35   | XORcists      | Faculty of Engineering, University of Peradeniya |
 | 36   | EDAnh      | National Taiwan University of Science and Technology |
+
+## Alpha Submission
+| Rank | Total Score | Notes     | 
+|----------|-------------|-------------|
+| Rank1  | 1279.97      |     | 
+| OpenROAD RSZ   | 1107.55  | [script](./scripts/evaluation_baseline.tcl)      | 
+| Rank2   | 1106.29      |      | 
+| Rank3   | 588.85      |      | 
+| pre_opt   | 0      | `contest.def` without any optimization  | 
 
 
 ## Contest Prizes

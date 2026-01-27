@@ -375,6 +375,48 @@ def check_locations(pre_nodes, post_nodes, node_type, equiv_groups=None):
     return len(violations) == 0, violations
 
 
+def calculate_logic_cell_movement(pre_nodes, post_nodes, equiv_groups):
+    """Calculate average movement for matched logic cells.
+
+    Logic cells are:
+    - Type "Inst" (excludes Macros and IOs by type)
+    - Master in equiv_groups (excludes fixed/physical cells)
+    Only considers cells that exist in both pre and post netlists.
+
+    Returns: (avg_movement, count, moved_count, max_movement)
+    """
+    total_movement = 0.0
+    count = 0
+    moved_count = 0
+    max_movement = 0.0
+
+    for name, (master, node_type, pre_x, pre_y) in pre_nodes.items():
+        # Skip Macros and IOs by type
+        if node_type != "Inst":
+            continue
+
+        # Skip fixed/physical cells (only include moveable logic cells)
+        if master not in equiv_groups:
+            continue
+
+        # Only consider matched cells (exist in both netlists)
+        if name not in post_nodes:
+            continue
+
+        _, _, post_x, post_y = post_nodes[name]
+        movement = abs(post_x - pre_x) + abs(post_y - pre_y)
+
+        total_movement += movement
+        count += 1
+        if movement > 1e-6:
+            moved_count += 1
+        if movement > max_movement:
+            max_movement = movement
+
+    avg_movement = total_movement / count if count > 0 else 0.0
+    return avg_movement, count, moved_count, max_movement
+
+
 def print_result(name, passed, violations, max_show=10):
     print(f"\n=== {name} ===")
     print(f"{'PASS' if passed else 'FAIL'}: {len(violations)} violations")
@@ -454,6 +496,16 @@ def main():
     results.append(("Check 3: Physical Cells", passed, violations))
     print_result("Check 3: Physical Cells", passed, violations)
     print(f"  Time: {time.time() - t0:.2f}s")
+
+    # Logic cell movement statistics
+    print("\n=== Logic Cell Movement Statistics ===")
+    avg_move, total_cells, moved_cells, max_move = calculate_logic_cell_movement(
+        pre_nodes, post_nodes, equiv_groups
+    )
+    print(f"  Matched logic cells: {total_cells}")
+    print(f"  Number of cells that moved: {moved_cells}")
+    print(f"  Average movement: {avg_move:.2f} units")
+    print(f"  Max movement: {max_move:.2f} units")
 
     # Check 4: Macro locations
     print("\nCheck 4: Macro Locations...")
