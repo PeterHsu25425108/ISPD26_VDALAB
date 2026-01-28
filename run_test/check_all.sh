@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 BENCHMARK_DIR="./Benchmarks"
 
+rm -r output_file/*
+rm -r run_test/log/*
+rm -r equiv_check/log/*
+
 for dir in "$BENCHMARK_DIR"/*/ ; do
     if [ -d "$dir" ]; then
         # Remove trailing slash and get the base name (e.g., "my_design_v2")

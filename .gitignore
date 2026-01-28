@@ -1,4 +1,6 @@
 Benchmarks/*
 .vscode/*
-run_test/*
+run_test/log/*
+run_test/*.zip
 output_file/*
+equiv_check/log/*
