@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+import os, sys, subprocess
+from pathlib import Path
+
+def main():
+    if len(sys.argv) != 5:
+        print("Usage: run.sh <input_dir> <platform_dir> <output_dir> <top_module>", file=sys.stderr)
+        return 2
+
+    input_dir, platform_dir, out_dir, top_module = sys.argv[1:5]
+    platform_dir = str(Path(platform_dir).resolve())
+    input_dir = str(Path(input_dir).resolve())
+    out_dir   = str(Path(out_dir).resolve())
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    script_dir = Path(__file__).resolve().parent
+    eco_tcl = script_dir / "eco_change.tcl"
+
+    env = os.environ.copy()
+    env["TOP_MODULE"] = top_module
+    env["PLATFORM_DIR"] = platform_dir
+    env["INPUT_DIR"] = input_dir
+    env["OUTPUT_DIR"] = out_dir
+
+    # eco_change.tcl 用 env 讀參數
+    cmd = ["openroad", "-exit", "-no_init", str(eco_tcl)]
+    subprocess.run(cmd, check=True, env=env)
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
