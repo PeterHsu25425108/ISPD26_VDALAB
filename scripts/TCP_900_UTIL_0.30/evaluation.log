@@ -1,6 +1,0 @@
-OpenROAD v2.0-26485-g7559f9664a 
-Features included (+) or not (-): +GPU +GUI +Python
-This program is licensed under the BSD-3 license. See the LICENSE file for details.
-Components of this program may be licensed under more restrictive licenses which must be honored.
-[ERROR STA-0340] cannot open '/ISPD26-Contest/scripts/evaluation.tcl'.
-STA-0340

@@ -90,7 +90,7 @@ echo "Installing NumPy..."
 echo "Installing PyTorch..."
 /usr/bin/pip3 install --break-system-packages --no-cache-dir torch==2.2.0
 
-echo "Installing torchdata (compatible version for DGL 2.1.0)..."
+echo "Installing torchdata (compatible version for DGL 2.3.0)..."
 # DGL 2.1.0 requires torchdata 0.6.x or 0.7.x, NOT 0.11.x
 /usr/bin/pip3 install --break-system-packages --no-cache-dir 'torchdata<0.8,>=0.6'
 
@@ -98,7 +98,9 @@ echo "Installing PyYAML (required by DGL)..."
 /usr/bin/pip3 install --break-system-packages --no-cache-dir PyYAML
 
 echo "Installing DGL..."
-/usr/bin/pip3 install --break-system-packages --no-cache-dir dgl==2.1.0
+# /usr/bin/pip3 install --break-system-packages --no-cache-dir dgl==2.3.0
+# /usr/bin/pip3 install --break-system-packages --no-cache-dir 'dgl-cu121==2.3.0' -f https://data.dgl.ai/wheels/torch-2.2/cu121/repo.html
+/usr/bin/pip3 install --break-system-packages dgl -f https://data.dgl.ai/wheels/torch-2.2/cu121/repo.html
 
 echo "Installing remaining packages..."
 /usr/bin/pip3 install --break-system-packages --no-cache-dir \
@@ -106,6 +108,9 @@ echo "Installing remaining packages..."
     pandas \
     scikit-learn \
     pydantic
+
+echo "Installing snakeviz for profiling (optional)..."
+/usr/bin/pip3 install --break-system-packages --no-cache-dir snakeviz
 
 # Clean pip cache in root after installation
 rm -rf /root/.cache/pip 2>/dev/null || true
@@ -173,6 +178,13 @@ PYTHON_PACKAGES=(
     "pydantic"
     "torchdata"
 )
+
+# Verify snakeviz installation
+if /usr/bin/python3 -c "import snakeviz" 2>/dev/null; then
+    echo "✓ snakeviz is installed"
+else
+    echo "✗ snakeviz is NOT installed"
+fi
 
 for package in "${PYTHON_PACKAGES[@]}"; do
     if /usr/bin/python3 -c "import $package" 2>/dev/null; then
