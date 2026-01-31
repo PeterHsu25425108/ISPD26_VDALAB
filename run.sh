@@ -13,6 +13,7 @@ top_module=$4
 
 source /opt/miniconda3/etc/profile.d/conda.sh
 conda deactivate 2>/dev/null || true
+umask 000
 openroad -exit -python src/demo2_gate_sizing.py "$input_dir" "$platform_dir" "$output_dir" "$top_module"
 
 # for profiling, uncomment the following line and comment out the above line
