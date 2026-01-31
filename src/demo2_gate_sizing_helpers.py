@@ -621,7 +621,12 @@ def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   
   # Load technology files into OpenROAD
   # (The techlef file is included in Platform/ASAP7/lef along with the designs' lef files, so we read all the lef files in the lef directory)
+  tech_lef_file = Path(platform_dir) / "lef" / "asap7_tech_1x_201209.lef"
+  ord_tech.readLef(str(tech_lef_file))
+  
   for lef in lefFiles:
+      if(lef == tech_lef_file):
+        continue
       print("Lef path: ", str(lef))
       ord_tech.readLef(str(lef))
       print("Read lef: ", str(lef))
