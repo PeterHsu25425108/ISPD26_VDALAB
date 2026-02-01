@@ -120,10 +120,20 @@ echo ""
 echo "Fixing graph-tool library conflict..."
 if [ -f /usr/local/lib/python3.12/dist-packages/torch/lib/libgomp-a34b3233.so.1 ]; then
     echo "Setting up library preload for graph-tool compatibility..."
-    # Add to bashrc for persistent fix
+    
+    # 1. THE SMART PERSISTENT FIX
     if ! grep -q "LD_PRELOAD.*libgomp" /root/.bashrc 2>/dev/null; then
-        echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1' >> /root/.bashrc
+        cat << 'EOF' >> /root/.bashrc
+
+# Conditional LD_PRELOAD for graph-tool (Safe for Host & Container)
+if [ -f /usr/lib/x86_64-linux-gnu/libgomp.so.1 ]; then
+    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1
+fi
+EOF
     fi
+
+    # 2. EXPORT FOR CURRENT SESSION (Keep this!)
+    # This ensures it works right now, before you restart the shell
     export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1
 fi
 
