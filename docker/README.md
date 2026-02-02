@@ -44,7 +44,7 @@ set up any artifacts required for running your submission within the `/opt/conte
 from the `/opt/contest` directory and will be called with the following arguments:
 - `input_dir` contains the input design: `contest.def`, `contest.sdc`, and `contest.v`.
 - `platform_dir` contains the ASAP7 enablement, in the same layout as [Platform/ASAP7](../Platform/ASAP7).
-- `output_dir` is the empty directory in which you will place your `result.def` and `result.v`.
+- `output_dir` is the empty directory in which you will place your `<design_name>.def` and `<design_name>.v` (e.g., ariane_v2.def, ariane_v2.v).
 - `top_module` is the top module of the design.
 
 See *Section 6. Submission Guidelines* and *Section 3.2.2. Platforms* in the [contest description](../ISPD26_contest_description.pdf) for more details. Please test your submission scripts in the container before submitting.
