@@ -4,7 +4,7 @@ set top_proj_dir    "$::env(TOP_PROJ_DIR)"
 set proj_dir        "$::env(PROJ_DIR)"
 
 source lib_setup.tcl
-source design_setup_baseline.tcl
+source design_setup.tcl
 source or_utils.tcl
 
 ## Read lef and lib files
