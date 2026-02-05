@@ -116,8 +116,10 @@ iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_nam
 ################################################
 #quick lookup for the instance name from the ID#
 ################################################
+# key: instance ID, value: instance name
 inst_names = {v['idx']:k for k,v in inst_dict.items()}
 # create DGL graph
+# Grpah config: undirected graph, edges from srcs to dsts and dsts to srcs (for message passing in both directions)
 G = dgl.graph((srcs+dsts,dsts+srcs))
 # store the featues for cell types, slack, slew, load, area, and max_size_index(for validity checks)
 G.ndata['cell_types'] = torch.tensor([ inst_dict[x]['cell_type'] for x in inst_names.values() ])

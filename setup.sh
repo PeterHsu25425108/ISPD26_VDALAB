@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -e  # Exit on error
+umask 000
 
 echo "=============================================="
 echo "ASP-DAC24-Tutorial Dependency Installation"

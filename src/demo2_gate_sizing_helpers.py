@@ -103,6 +103,16 @@ def get_type(cell_type, cell_dict, cell_name_dict):
   """Extract cell index and size from full cell name.
   
   Handles ASAP7 naming: INVx2_ASAP7_75t_R -> base_name='INV', size='x2'
+  
+  Expected cell name: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
+  
+  Args: 
+    cell_type: Full cell name string from OpenROAD (e.g., 'INVx2_ASAP7_75t_R')
+    cell_dict: Dictionary mapping cell indices to their properties
+    cell_name_dict: Dictionary mapping base cell names to their indices
+  Returns:
+    tuple: (cell_idx, size_idx) - indices for cell type and size
+  
   """
   import re
   
