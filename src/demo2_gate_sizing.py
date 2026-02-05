@@ -97,7 +97,7 @@ print(platform_dir)
 print(output_dir)
 print(top_module)
 
-ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict = load_ISPD_design(input_dir, platform_dir, output_dir, top_module)
+ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict, avg_clk_period = load_ISPD_design(input_dir, platform_dir, output_dir, top_module)
 ################################################################################
 #srcs, dsts : source and destination instances for the graph function.         #
 #inst_dict : Dictionary that stores all the properties of the instances.       #
@@ -112,7 +112,7 @@ ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict =
 #   - timing.getPortCap(): Get load capacitances
 # These timing values are stored in inst_dict and later used to populate the DGL graph
 inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict = \
-iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict)
+iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict, avg_clk_period)
 ################################################
 #quick lookup for the instance name from the ID#
 ################################################
@@ -133,7 +133,7 @@ G.edata['types'] = torch.cat((torch.zeros(len(srcs),dtype=torch.long),torch.ones
 # normalization parameters
 norm_data = {
   'max_area' : 1.0*np.max(G.ndata['area'].cpu().numpy()),
-  'clk_period' : CLKset[0],
+  'clk_period' : avg_clk_period,
   'max_slew' : 1.0*np.max(G.ndata['slew'].cpu().numpy()),
   'max_load' : 1.0*np.max(G.ndata['load'].cpu().numpy()),
 }
@@ -222,8 +222,7 @@ for i_episode in range(num_episodes):
   #Initialize the environment and state#
   ######################################
   episode_G, episode_inst_dict = env_reset(reset_state, i_episode,\
-    cell_name_dict, CLKset, ord_design, timing, G, inst_dict, CLK_DECAY, CLK_DECAY_STRT,\
-    clk_init, clk_range, clk_final, inst_names, block, cell_dict, norm_data, device)
+    cell_name_dict, avg_clk_period, ord_design, timing, G, inst_dict, inst_names, block, cell_dict, norm_data, device)
   best_cost = calc_cost(episode_G, Slack_Lambda)
   cumulative_reward = 0
   count_bads = 0
@@ -269,7 +268,7 @@ for i_episode in range(num_episodes):
     #get reward and next state based on the action#
     ###############################################
     reward, done_env, next_state, episode_inst_dict, episode_G  = env_step(episode_G, critical_graph,\
-        state, action.item(), CLKset, ord_design, timing, cell_dict, norm_data, inst_names,\
+        state, action.item(), avg_clk_period, ord_design, timing, cell_dict, norm_data, inst_names,\
         episode_inst_dict, inst_dict, n_cells, n_features, block, device, Slack_Lambda, eps)
     if t%10 == 9:
       print("Updating cell size in the DB. Recalculating timing results.")

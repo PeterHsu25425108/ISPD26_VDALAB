@@ -130,7 +130,7 @@ def get_type(cell_type, cell_dict, cell_name_dict):
     print("cell: "+cell+" not in dictionary")
     return None,None
 
-def pin_properties(dbpin, CLKset, ord_design, timing):
+def pin_properties(dbpin, clk_period, ord_design, timing):
   """
   Extracts timing properties from OpenROAD for a given pin.
   
@@ -141,7 +141,7 @@ def pin_properties(dbpin, CLKset, ord_design, timing):
   
   Args:
     dbpin: OpenDB pin object (ITerm) to query
-    CLKset: Clock period settings
+    clk_period: Clock period for normalization (ns)
     ord_design: OpenROAD Design object
     timing: OpenROAD Timing object (OpenSTA)
     
@@ -154,7 +154,7 @@ def pin_properties(dbpin, CLKset, ord_design, timing):
   # slack = required_time - arrival_time (negative means timing violation)
   # Query both rise and fall slack, take the worst (minimum)
   slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max), timing.getPinSlack(dbpin, timing.Rise, timing.Max))
-  if slack < -0.5*CLKset[0]:
+  if slack < -0.5*clk_period:
     slack = 0
   
   # Get slew (transition time) from OpenROAD timing engine
@@ -323,7 +323,7 @@ def get_state(graph, n_state, n_cells, n_features):
   state[:,:-n_features] =F.one_hot(graph.ndata['cell_types'][:,0],n_cells)*graph.ndata['cell_types'][:,1:2]
   return state
 
-def env_step(episode_G, graph, state, action, CLKset, ord_design, timing,\
+def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
             cell_dict, norm_data, inst_names, episode_inst_dict, inst_dict,\
             n_cells, n_features, block, device, Slack_Lambda, eps):
   next_state = state.clone()
@@ -392,7 +392,7 @@ def env_step(episode_G, graph, state, action, CLKset, ord_design, timing,\
     if tmp_db_pin.getNet() != None:
       (episode_inst_dict[inst]['slack'],
       episode_inst_dict[inst]['slew'],
-      episode_inst_dict[inst]['load']) = pin_properties(tmp_db_pin, CLKset, ord_design, timing)
+      episode_inst_dict[inst]['load']) = pin_properties(tmp_db_pin, clk_period, ord_design, timing)
       new_slacks[n] = episode_inst_dict[inst]['slack']
       new_slews[n] = episode_inst_dict[inst]['slew']
       new_loads[n] = episode_inst_dict[inst]['load']
@@ -429,9 +429,8 @@ def env_step(episode_G, graph, state, action, CLKset, ord_design, timing,\
   return reward, done, next_state, episode_inst_dict, episode_G
 
 def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
-              CLKset = None, ord_design = None, timing = None, G = None,\
-              inst_dict = None, CLK_DECAY = None, CLK_DECAY_STRT = None,\
-              clk_init = None, clk_range = None, clk_final = None, inst_names = None,\
+              clk_period = None, ord_design = None, timing = None, G = None,\
+              inst_dict = None, inst_names = None,\
               block = None, cell_dict = None, norm_data = None, device = None):
   episode_G = copy.deepcopy(G)
   episode_inst_dict = copy.deepcopy(inst_dict)
@@ -471,7 +470,7 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
     if tmp_db_pin.getNet() != None:
       (episode_inst_dict[inst]['slack'],
       episode_inst_dict[inst]['slew'],
-      episode_inst_dict[inst]['load']) = pin_properties(tmp_db_pin, CLKset, ord_design, timing)
+      episode_inst_dict[inst]['load']) = pin_properties(tmp_db_pin, clk_period, ord_design, timing)
       new_slacks[n] = episode_inst_dict[inst]['slack']
       new_slews[n] = episode_inst_dict[inst]['slew']
       new_loads[n] = episode_inst_dict[inst]['load']
@@ -545,7 +544,6 @@ unit_micron = 2000
 design = 'pid'
 semi_opt_clk = '0.65'
 clock_name = "i_clk"
-CLK_DECAY=100; CLK_DECAY_STRT=25
 n_features = 4
 BATCH_SIZE = 64#128
 GAMMA = 0.99
@@ -572,10 +570,6 @@ count_bads = 0
 best_delay = 5
 min_working_clk = 100
 K = 4# set seprately to critical and non critical # accelration factor
-CLKset = [0.6]
-clk_final = CLKset[0]
-clk_range = 0.98*(float(semi_opt_clk) - CLKset[0])
-clk_init = clk_final + clk_range
 
 def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   """
@@ -676,7 +670,34 @@ def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   cell_dict, cell_name_dict = build_cell_dict_from_openroad(db, timing)
   print(f"Built cell dictionary with {len(cell_dict)} cell types")
   
-  return ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict
+  # Extract clock periods from SDC using TCL commands
+  # Get all clocks and their periods
+  try:
+    clocks_tcl = ord_design.evalTclString("get_clocks *")
+    if clocks_tcl and clocks_tcl.strip():
+      # Get clock periods (returns list of periods in ns)
+      clock_list = clocks_tcl.strip().split()
+      clock_periods = []
+      for clk_name in clock_list:
+        period_str = ord_design.evalTclString(f"get_property [get_clocks {clk_name}] period")
+        if period_str:
+          clock_periods.append(float(period_str))
+      
+      if clock_periods:
+        avg_clk_period = sum(clock_periods) / len(clock_periods)
+        print(f"Found {len(clock_periods)} clocks with periods: {clock_periods}")
+        print(f"Using average clock period for normalization: {avg_clk_period:.4f} ns")
+      else:
+        avg_clk_period = 1.0  # Fallback
+        print(f"[WARN] Could not extract clock periods, using fallback: {avg_clk_period} ns")
+    else:
+      avg_clk_period = 1.0  # Fallback
+      print(f"[WARN] No clocks found in SDC, using fallback period: {avg_clk_period} ns")
+  except Exception as e:
+    print(f"[WARN] Error extracting clock info: {e}, using fallback period: 1.0 ns")
+    avg_clk_period = 1.0
+  
+  return ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict, avg_clk_period
 
 def load_design(path):
   """
@@ -730,7 +751,8 @@ def load_design(path):
   ord_design.link(design)  # Link top module
   
   # Set clock constraint using TCL command through OpenROAD
-  ord_design.evalTclString("create_clock [get_ports i_clk] -name core_clock -period " + str(clk_init*1e-9))
+  # Note: This function is legacy code from ASP-DAC tutorial, not used for ISPD contest
+  ord_design.evalTclString("create_clock [get_ports i_clk] -name core_clock -period 0.65")
   
   # Get OpenDB database objects for querying and modification
   db = ord.get_db()
@@ -864,7 +886,7 @@ def build_cell_dict_from_openroad(db, timing):
   return cell_dict, cell_name_dict
 
 
-def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict):
+def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict, clk_period):
   """
   Traverses the netlist and extracts circuit properties from OpenROAD to build a graph.
   
@@ -884,6 +906,7 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
     block: Design block containing instances
     cell_dict: Dictionary of cell types
     cell_name_dict: Lookup table for cell names
+    clk_period: Clock period for normalization (ns)
     
   Returns:
     tuple: (inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict)
@@ -963,7 +986,7 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
         #   print(f"  Extracting timing properties at net {net_idx}...")
         (inst_dict[inst_name]['slack'],
          inst_dict[inst_name]['slew'],
-         inst_dict[inst_name]['load'])= pin_properties(s_iterm, CLKset, ord_design, timing)
+         inst_dict[inst_name]['load'])= pin_properties(s_iterm, clk_period, ord_design, timing)
       # else: Pin is neither input nor output (power, clock, etc.) - skip it
     # list the connections for the graph creation step and the fainin/fanout dictionaries
     for src,src_term in net_srcs:
