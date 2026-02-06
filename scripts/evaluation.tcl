@@ -4,9 +4,8 @@ set proj_dir        "$::env(PROJ_DIR)"
 set design_name     "$::env(DESIGN_NAME)"
 set crfile          "$::env(CONGESTION_REPORT)"
 set folder          "$::env(FOLDER_NAME)"
-
-set lib_setup_file    "lib_setup.tcl"
-set design_setup_file "design_setup.tcl"
+set lib_setup_file    "$::env(LIB_SETUP)"
+set design_setup_file "$::env(DESIGN_SETUP)"
 
 set start [clock seconds]
 source $lib_setup_file
