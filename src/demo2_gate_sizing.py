@@ -98,6 +98,18 @@ print(output_dir)
 print(top_module)
 
 ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict, avg_clk_period = load_ISPD_design(input_dir, platform_dir, output_dir, top_module)
+
+# ERC_fix_start_time = time()
+# print("=== Running ERC fix ===")
+# ord_design.evalTclString("estimate_parasitics -placement")
+# ord_design.evalTclString("repair_design")
+# print(time() - ERC_fix_start_time, "seconds for ERC fix")
+
+# print("=== Running timing repair ===")
+# timing_fix_start_time = time()
+# ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
+# print(time() - timing_fix_start_time, "seconds for timing repair")
+
 ################################################################################
 #srcs, dsts : source and destination instances for the graph function.         #
 #inst_dict : Dictionary that stores all the properties of the instances.       #
@@ -427,14 +439,6 @@ for inst_name, master_name in zip(inst_names.values(), best_cells):
         print(f"[ERROR] swapMaster failed for {inst_name} -> {master_name}: {e}")
 
 print(time() - restore_start_time, "seconds for restoring best-known configuration")
-
-# ERC_fix_start_time = time()
-# print("=== Running ERC fix ===")
-# ord_design.evalTclString("estimate_parasitics -placement")
-# ord_design.evalTclString("repair_design")
-# print(time() - ERC_fix_start_time, "seconds for ERC fix")
-
-# ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
 
 dp_start_time = time()
 print("=== Running detailed placement ===")

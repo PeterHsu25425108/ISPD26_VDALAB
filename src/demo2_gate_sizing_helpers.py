@@ -28,6 +28,9 @@
 #CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 #OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 #OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+from datetime import time
+import json
+from time import time
 import openroad as ord
 import pdn, odb, utl
 from openroad import Tech, Design, Timing
@@ -47,7 +50,6 @@ from pathlib import Path
 import sys
 import glob
 from glob import glob
-
 
 # replay memory
 class ReplayMemory(object):
@@ -116,9 +118,10 @@ def get_type(cell_type, cell_dict, cell_name_dict):
   """
   import re
   
-  # Parse ASAP7 cell name: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
+  # Parse ASAP7 cell name: <CELLNAME>x<SIZE>[suffix]_ASAP7_75t_<VT>
+  # Supports formats like: INVx2, BUFx4f (where 'f' = faster variant)
   # match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7', cell_type)
-  match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7_75t_(.*)', cell_type)
+  match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?[a-z]?)_ASAP7_75t_(.*)', cell_type)
   if not match:
     print(f"Could not parse cell type: {cell_type}")
     return None, None
@@ -496,7 +499,8 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
 
 
 def calc_cost(ep_G, Slack_Lambda):
-  cost = torch.sum(ep_G.ndata['area'].to('cpu'))
+  # cost = torch.sum(ep_G.ndata['area'].to('cpu'))
+  cost = 0
   x = ep_G.ndata['slack'].to('cpu')
   new_slacks = torch.min(x, torch.zeros_like(x))
   cost += torch.sum(Slack_Lambda*(-new_slacks))
@@ -668,6 +672,23 @@ def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   ord_design.evalTclString("set_cmd_units -time ns -capacitance pF -current mA -voltage V -resistance kOhm -distance um -power mW")
   ord_design.evalTclString("set_units -power mW")
   
+  ERC_fix_start_time = time()
+  print("=== Running ERC fix ===")
+  ord_design.evalTclString("estimate_parasitics -placement")
+  ord_design.evalTclString("repair_design")
+  print(time() - ERC_fix_start_time, "seconds for ERC fix")
+
+  print("=== Running timing repair ===")
+  timing_fix_start_time = time()
+  ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
+  print(time() - timing_fix_start_time, "seconds for timing repair")
+  
+  # report tns and wns after repair
+  tns = ord_design.evalTclString("report_tns")
+  wns = ord_design.evalTclString("report_wns")
+  # print(f"TNS after repair: {tns}")
+  # print(f"WNS after repair: {wns}")
+  
   # Get OpenDB database objects for querying and modification
   db = ord.get_db()
   chip = db.getChip()
@@ -823,8 +844,9 @@ def build_cell_dict_from_openroad(db, timing):
       continue
     
     # Extract base name and size for ASAP7 cells (e.g., "INVx2_ASAP7_75t_R" -> "INV", "x2")
-    # Pattern: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
-    match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7_75t_(.*)', master_name)
+    # Pattern: <CELLNAME>x<SIZE>[suffix]_ASAP7_75t_<VT>
+    # Supports formats like: INVx2, BUFx16f (where 'f' = faster variant)
+    match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?[a-z]?)_ASAP7_75t_(.*)', master_name)
     if match:
       base_name = match.group(1)
       size_suffix = match.group(2)
@@ -836,8 +858,11 @@ def build_cell_dict_from_openroad(db, timing):
   cell_name_dict = {}
   
   def parse_size(size_suffix):
-    """Convert size suffix to float (e.g., 'x2' -> 2.0, 'xp33' -> 0.33, 'x1p5' -> 1.5)"""
+    """Convert size suffix to float (e.g., 'x2' -> 2.0, 'xp33' -> 0.33, 'x1p5' -> 1.5, 'x16f' -> 16.0)
+    Note: Letter suffixes like 'f' (faster) are stripped but don't affect numeric value."""
     size_str = size_suffix[1:]  # Remove 'x' prefix
+    # Strip any trailing letter suffix (e.g., 'f' for faster variant)
+    size_str = re.sub(r'[a-z]+$', '', size_str)
     if 'p' in size_str:
       # Handle decimal notation (xp33 -> 0.33, x1p5 -> 1.5)
       parts = size_str.split('p')
@@ -892,6 +917,12 @@ def build_cell_dict_from_openroad(db, timing):
     }
     
     cell_name_dict[base_name] = str(idx)
+  
+
+  os.makedirs(os.path.dirname("dict_files/cell_dict.json"), exist_ok=True)
+  # Open the file in write mode ('w') and use json.dump()
+  with open("dict_files/cell_dict.json", "w") as json_file:
+    json.dump(cell_dict, json_file, indent=4)
   
   return cell_dict, cell_name_dict
 
