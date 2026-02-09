@@ -41,7 +41,7 @@ process_case() {
 
     echo " ===== Running design: $design_name ====== "
     
-    bash run.sh "$input_dir" "$platform_dir" "$output_dir" "$top_module"
+    bash run.sh "$input_dir" "$platform_dir" "$output_dir" "$top_module" | tee log_file/${design_name}/runtime_msg.log
 }
 
 # Check if a specific design name is provided

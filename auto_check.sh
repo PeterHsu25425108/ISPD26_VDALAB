@@ -12,7 +12,7 @@ OR_EXE="/OpenROAD/build/bin/openroad"
 export DESIGN_NAME="$1"
 
 # Default values
-POST_OPT=1
+POST_OPT=true
 EQ_CHECK=1
 
 # Parse positional arguments for POST_OPT= or EQ_CHECK=
@@ -55,6 +55,10 @@ export OUTPUT_DIR="${TOP_PROJ_DIR}/output_file"
 
 # mkdir ${FOLDER_NAME} -p
 mkdir ${LOG_DIR} -p
+# clear LOG_DIR if it exist
+if [ -d "${LOG_DIR}" ]; then
+    rm -rf ${LOG_DIR}/*
+fi
 
 # export EVAL_LOG_FILE="$(TOP_PROJ_DIR)/evaluation.log"
 export EVAL_LOG_FILE="${LOG_DIR}/evaluation.log"
@@ -83,6 +87,9 @@ fi
 echo "Extracting metrics to CSV..."
 echo "eval_log path: ${EVAL_LOG_FILE}"
 python3 ${PROJ_DIR}/parse_log.py ${EVAL_LOG_FILE} --csv ${METRICS_CSV}
+
+# turn metrics.csv into a table
+python3 ${PROJ_DIR}/smart_eval/metrics_to_table.py ${LOG_DIR}/metrics.csv ${LOG_DIR}/metrics.log
 
 EQ_LOG_FILE="${LOG_DIR}/equiv_cells.log"
 echo "Running run_equiv_check.tcl..."
