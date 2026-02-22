@@ -15,6 +15,7 @@ Prof. Zhiang Wang, Fudan University [zhiangwang@fudan.edu.cn]
 - [Benchmarks](https://vlsicad.ucsd.edu/ISPD26-Contest/ispd26.html): Public benchmarks.
 - [Platform/ASAP7](./Platform/ASAP7): Technology platform files and libraries for the ASAP7 PDK.
 - [Evaluation scripts](./scripts): Evaluation scripts for [aes_cipher_top](./scripts/aes_cipher_top/eval.sh), [jpeg_encoder](./scripts/jpeg_encoder/eval.sh), [ariane](./scripts/ariane/eval.sh) and [bsg_chip](./scripts/bsg_chip/eval.sh). 
+- [Equivalence check](./equiv_check): Scripts for validating equivalence between pre-optimization and post-optimization netlists for ASAP7 designs.
 - [Docker containers and submission formatting](./docker): Dockerfile and commands required to maintain a consistent evaluation and submission environment can be found at the [`README`](./docker/README.md).
 
 ## Timeline
@@ -25,8 +26,8 @@ Prof. Zhiang Wang, Fudan University [zhiangwang@fudan.edu.cn]
 - Release one large-scale testcase: Dec. 1, 2025
 - Release one large-scale testcase with placement blockages; all public benchmarks are available: Dec. 3, 2025
 - Alpha Submission Deadline: Jan 12, 2026
-- **Beta Submission Deadline: Feb, 2, 2026**
-- Final Submission Deadline: Mar, 7, 2026 (Anywhere on earth, and it is a hard deadline)
+- Beta Submission Deadline: Feb, 2, 2026
+- **Final Submission Deadline: Mar, 7, 2026 (Anywhere on earth, and it is a hard deadline)**
 - Results Announcement: March 18, 2026
 
 
@@ -85,6 +86,15 @@ Email: ispd26contest@gmail.com
 | OpenROAD RSZ   | 1107.55  | [script](./scripts/evaluation_baseline.tcl)      | 
 | Rank2   | 1106.29      |      | 
 | Rank3   | 588.85      |      | 
+| pre_opt   | 0      | `contest.def` without any optimization  | 
+
+## Beta Submission
+| Rank | Total Score | Notes     | 
+|----------|-------------|-------------|
+| Rank1  | 1309.12      |     | 
+| Rank2   | 1185.65      |      | 
+| Rank3   | 1109.22      |      | 
+| OpenROAD RSZ   | 1107.55  | [script](./scripts/evaluation_baseline.tcl)      | 
 | pre_opt   | 0      | `contest.def` without any optimization  | 
 
 
