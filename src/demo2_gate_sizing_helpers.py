@@ -82,7 +82,8 @@ class DQN(nn.Module):
     super(DQN, self).__init__()
     self.conv1 = RelGraphConv(n_state,64,2)
     self.conv2 = RelGraphConv(64,64,2)
-    self.conv3 = RelGraphConv(64,2,2)
+    # Output 4 actions per node: upsize, downsize, increase VT, decrease VT
+    self.conv3 = RelGraphConv(64,4,2)
     self.device = device
     self.n_state = n_state
     self.n_cells = n_cells
@@ -102,9 +103,9 @@ class DQN(nn.Module):
     return x
 
 def get_type(cell_type, cell_dict, cell_name_dict):
-  """Extract cell index and size from full cell name.
+  """Extract cell index, size, and VT from full cell name.
   
-  Handles ASAP7 naming: INVx2_ASAP7_75t_R -> base_name='INV', size='x2'
+  Handles ASAP7 naming: INVx2_ASAP7_75t_R -> base_name='INV', size='x2', vt='R'
   
   Expected cell name: <CELLNAME>x<SIZE>_ASAP7_75t_<VT>
   
@@ -113,35 +114,49 @@ def get_type(cell_type, cell_dict, cell_name_dict):
     cell_dict: Dictionary mapping cell indices to their properties
     cell_name_dict: Dictionary mapping base cell names to their indices
   Returns:
-    tuple: (cell_idx, size_idx) - indices for cell type and size
+    tuple: (cell_idx, size_idx, vt_idx) - indices for cell type, size, and VT
+           Returns (None, None, None) on error
   
   """
   import re
   
   # Parse ASAP7 cell name: <CELLNAME>x<SIZE>[suffix]_ASAP7_75t_<VT>
   # Supports formats like: INVx2, BUFx4f (where 'f' = faster variant)
-  # match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?)_ASAP7', cell_type)
   match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?[a-z]?)_ASAP7_75t_(.*)', cell_type)
   if not match:
     print(f"Could not parse cell type: {cell_type}")
-    return None, None
+    return None, None, None
   
   cell = match.group(1)  # Base name (e.g., 'INV')
   drive = match.group(2)  # Size suffix (e.g., 'x2')
-  vt = match.group(3)
+  vt = match.group(3)  # VT suffix (e.g., 'R', 'L', 'SL')
   
   if cell in cell_name_dict:
     cell_values = cell_dict[cell_name_dict[cell]]
-    if drive in cell_values['sizes']:
-      idx = cell_values['sizes'].index(drive)
-      return int(cell_name_dict[cell]), idx #, vt
+    vt_to_idx = cell_values.get('vt_to_idx', {'SL': 0, 'SLVT': 0, 'L': 1, 'LVT': 1, 'R': 2, 'RVT': 2})
+    
+    # Find matching entry with both size and VT\n    # Since sizes and vt_types are parallel arrays, we need to find matching (size, vt) pair
+    vt_idx = vt_to_idx.get(vt, 0)  # Default to SLVT if VT not recognized
+    
+    # Find the first occurrence with matching size and VT
+    for i, (sz, vt_i) in enumerate(zip(cell_values['sizes'], cell_values['vt_types'])):
+      if sz == drive and vt_i == vt_idx:
+        # Return: cell_idx, size_idx (index in unique_sizes), vt_idx
+        size_idx = cell_values['unique_sizes'].index(drive)
+        return int(cell_name_dict[cell]), size_idx, vt_idx
+    
+    # If exact match not found, try finding just by size (for backwards compatibility)
+    if drive in cell_values['unique_sizes']:
+      size_idx = cell_values['unique_sizes'].index(drive)
+      print(f"Warning: VT {vt} not found for {cell}{drive}, using default VT index {vt_idx}")
+      return int(cell_name_dict[cell]), size_idx, vt_idx
     else:
       print("Drive strength "+drive+" not found in cell :"+cell)
-      print("Possible sizes", cell_values['sizes'])
-      return None,None
+      print("Possible sizes", cell_values['unique_sizes'])
+      return None, None, None
   else:
     print("cell: "+cell+" not in dictionary")
-    return None,None
+    return None, None, None
 
 def pin_properties(dbpin, clk_period, ord_design, timing):
   """
@@ -193,13 +208,33 @@ def min_slack(dbpin, timing):
   return slack
 
 def generate_masked_actions(graph):
-  # max size keep track of the index of the maximum size.
-  # If the current size is maximum size we mask it out as an action
-  upper_mask = graph.ndata['cell_types'][:,1] >= graph.ndata['max_size']-1
-  lower_mask = graph.ndata['cell_types'][:,1] == 0
-  # if the criteria for the mask is met we replace it with the minimum
-  # to make sure that that action is never chosen
-  mask = torch.cat((upper_mask.view(-1,1), lower_mask.view(-1,1)),1)
+  # Mask actions based on current cell configuration
+  # Action encoding: action%4 determines action type:
+  #   0: upsize (increase drive strength)
+  #   1: downsize (decrease drive strength)
+  #   2: increase VT (SLVT->LVT->RVT, faster but more power)
+  #   3: decrease VT (RVT->LVT->SLVT, slower but less power)
+  # action/4: selects which cell node
+  
+  # cell_types now has shape (N, 3): [cell_idx, size_idx, vt_idx]
+  # max_size: maximum size index for each cell type
+  # max_vt: maximum VT index (should be 2 for RVT)
+  
+  # Mask upsize action if already at max size
+  upsize_mask = graph.ndata['cell_types'][:,1] >= graph.ndata['max_size']-1
+  # Mask downsize action if already at min size (0)
+  downsize_mask = graph.ndata['cell_types'][:,1] == 0
+  # Mask increase VT action if already at max VT (RVT = 2)
+  increase_vt_mask = graph.ndata['cell_types'][:,2] >= graph.ndata['max_vt']
+  # Mask decrease VT action if already at min VT (SLVT = 0)
+  decrease_vt_mask = graph.ndata['cell_types'][:,2] == 0
+  
+  # Combine masks: (N, 4) tensor
+  # If mask[i,j] is True, action j is invalid for node i
+  mask = torch.cat((upsize_mask.view(-1,1), 
+                    downsize_mask.view(-1,1),
+                    increase_vt_mask.view(-1,1),
+                    decrease_vt_mask.view(-1,1)), 1)
   return mask
 
 def update_lambda(initial_lambda, slacks, K):
@@ -333,7 +368,11 @@ def get_state(graph, n_state, n_cells, n_features):
   state[:,-2] = graph.ndata['slack']
   state[:,-3] = graph.ndata['slew']
   state[:,-4] = graph.ndata['load']
-  state[:,:-n_features] =F.one_hot(graph.ndata['cell_types'][:,0],n_cells)*graph.ndata['cell_types'][:,1:2]
+  # Encode cell type (one-hot) multiplied by size
+  # cell_types is now 3D: [cell_idx, size_idx, vt_idx]
+  # We encode both size and VT information
+  state[:,:-n_features] = F.one_hot(graph.ndata['cell_types'][:,0],n_cells) * \
+                          (graph.ndata['cell_types'][:,1:2] + 0.1 * graph.ndata['cell_types'][:,2:3])
   return state
 
 def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
@@ -342,42 +381,68 @@ def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
   next_state = state.clone()
   reward = 0
   done =0
-  #based on the selected action you choose the approriate cell and upsize it or downsize
-  cell_sub = int(action/2)
+  
+  # Action encoding: action%4 determines action type, action/4 selects cell
+  # 0: upsize, 1: downsize, 2: increase VT, 3: decrease VT
+  cell_sub = int(action/4)
+  action_type = action % 4
+  
   cell = graph.ndata['_ID'][cell_sub].item()
   inst_name = inst_names[cell]
+  
+  # Get current cell configuration: (cell_idx, size_idx, vt_idx)
   cell_size = episode_inst_dict[inst_name]['cell_type'][1]
   cell_idx = episode_inst_dict[inst_name]['cell_type'][0]
+  cell_vt = episode_inst_dict[inst_name]['cell_type'][2]
+  
   dbpin = block.findITerm(inst_name + cell_dict[str(inst_dict[inst_name]['cell_type'][0])]['out_pin'])
   old_slack = min_slack(dbpin, timing)
-  o_master_name = cell_dict[str(cell_idx)]['name']+\
-                  cell_dict[str(cell_idx)]['sizes'][cell_size]
-  if(action%2 == 0):
-      cell_size +=1
-  else:
-      cell_size -=1
-  if(cell_size>=cell_dict[str(cell_idx)]['n_sizes']):
-    print("Above max")
-    print(action,cell_dict[str(cell_idx)]['n_sizes'], cell_idx, cell_size)
-  if(cell_size<0):
-    print("below min")
-    print(action,cell_dict[str(cell_idx)]['n_sizes'], cell_idx, cell_size)
-  episode_inst_dict[inst_name]['cell_type'] = (cell_idx,cell_size)
-  size = cell_dict[str(cell_idx)]['sizesi'][cell_size] #actual size
+  
+  # Apply action to modify cell configuration
+  new_cell_size = cell_size
+  new_cell_vt = cell_vt
+  
+  if action_type == 0:  # Upsize
+      new_cell_size += 1
+  elif action_type == 1:  # Downsize
+      new_cell_size -= 1
+  elif action_type == 2:  # Increase VT (SLVT->LVT->RVT)
+      new_cell_vt += 1
+  elif action_type == 3:  # Decrease VT (RVT->LVT->SLVT)
+      new_cell_vt -= 1
+  
+  # Validate bounds
+  if new_cell_size >= cell_dict[str(cell_idx)]['n_sizes']:
+    print(f"Above max size: action={action}, n_sizes={cell_dict[str(cell_idx)]['n_sizes']}, cell_idx={cell_idx}, size={new_cell_size}")
+  if new_cell_size < 0:
+    print(f"Below min size: action={action}, n_sizes={cell_dict[str(cell_idx)]['n_sizes']}, cell_idx={cell_idx}, size={new_cell_size}")
+  if new_cell_vt > 2:  # RVT is max
+    print(f"Above max VT: action={action}, cell_idx={cell_idx}, vt={new_cell_vt}")
+  if new_cell_vt < 0:  # SLVT is min
+    print(f"Below min VT: action={action}, cell_idx={cell_idx}, vt={new_cell_vt}")
+  
+  # Update cell configuration
+  episode_inst_dict[inst_name]['cell_type'] = (cell_idx, new_cell_size, new_cell_vt)
+  size = cell_dict[str(cell_idx)]['sizesi'][new_cell_size] if new_cell_size < len(cell_dict[str(cell_idx)]['sizesi']) else 1.0
 
-  #one hot encode the relavant feature with the magnitude of size.
+  # Update state representation
   next_state[cell_sub,:-n_features] = F.one_hot(torch.tensor([cell_idx]),n_cells)*size
-  episode_G.ndata['cell_types'][cell] = torch.tensor((cell_idx,cell_size))
+  episode_G.ndata['cell_types'][cell] = torch.tensor((cell_idx, new_cell_size, new_cell_vt))
 
-  #replace the master node in the code and find the new slack,
+  # Construct new master cell name with proper VT suffix
   inst = block.findInst(inst_name)
-  n_master_name = cell_dict[str(cell_idx)]['name']+cell_dict[str(cell_idx)]['sizes'][cell_size]  + "_ASAP7_75t_SL"
+  idx_to_vt = cell_dict[str(cell_idx)].get('idx_to_vt', {0: 'SL', 1: 'L', 2: 'R'})
+  vt_suffix = idx_to_vt.get(new_cell_vt, 'SL')
+  n_master_name = (cell_dict[str(cell_idx)]['name'] + 
+                   cell_dict[str(cell_idx)]['unique_sizes'][new_cell_size] + 
+                   "_ASAP7_75t_" + vt_suffix)
+  
   db = ord.get_db()
   n_master = db.findMaster(n_master_name)
   if n_master is None:
-    print(f"[ERROR] swapMaster: Master cell '{n_master_name}' not found in DB for instance '{inst_name}'. Skipping swap.")
-    print(f"  cell_idx: {cell_idx}, cell_size: {cell_size}, cell_dict entry: {cell_dict.get(str(cell_idx), {})}")
-    print(f"  Available master names: {[m.getName() for lib in db.getLibs() for m in lib.getMasters() if cell_dict[str(cell_idx)]['name'] in m.getName()]}")
+    print(f"[ERROR] swapMaster: Master cell '{n_master_name}' not found in DB for instance '{inst_name}'.")
+    print(f"  cell_idx: {cell_idx}, cell_size: {new_cell_size}, vt_idx: {new_cell_vt}, cell_dict entry: {cell_dict.get(str(cell_idx), {})}")
+    print(f"  Available master names: {[m.getName() for lib in db.getLibs() for m in lib.getMasters() if cell_dict[str(cell_idx)]['name'] in m.getName()][:5]}...")
   else:
     try:
       inst.swapMaster(n_master)
@@ -455,14 +520,19 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
     inst = block.findInst(inst_name)
     if reset_state is not None:
       o_master_name = reset_state[i]
-      cell_idx, cell_size = get_type(o_master_name, cell_dict, cell_name_dict)
-      episode_inst_dict[inst_name]['cell_type'] = (cell_idx,cell_size)
-      episode_G.ndata['cell_types'][i] = torch.tensor((cell_idx,cell_size))
+      cell_idx, cell_size, cell_vt = get_type(o_master_name, cell_dict, cell_name_dict)
+      episode_inst_dict[inst_name]['cell_type'] = (cell_idx, cell_size, cell_vt)
+      episode_G.ndata['cell_types'][i] = torch.tensor((cell_idx, cell_size, cell_vt))
     else:
       cell_size = episode_G.ndata['cell_types'][i,1].item()
       cell_idx = episode_G.ndata['cell_types'][i,0].item()
-      o_master_name = cell_dict[str(cell_idx)]['name']+\
-              cell_dict[str(cell_idx)]['sizes'][cell_size]
+      cell_vt = episode_G.ndata['cell_types'][i,2].item()
+      
+      idx_to_vt = cell_dict[str(cell_idx)].get('idx_to_vt', {0: 'SL', 1: 'L', 2: 'R'})
+      vt_suffix = idx_to_vt.get(int(cell_vt), 'SL')
+      o_master_name = (cell_dict[str(cell_idx)]['name'] +
+                       cell_dict[str(cell_idx)]['unique_sizes'][int(cell_size)] +
+                       "_ASAP7_75t_" + vt_suffix)
 
     db = ord.get_db()
     o_master = db.findMaster(o_master_name)
@@ -511,13 +581,16 @@ def get_state_cells(ep_dict, inst_names, cell_dict):
   for x in inst_names.values():
     cell_size = ep_dict[x]['cell_type'][1]
     cell_idx = ep_dict[x]['cell_type'][0]
-    cell_vt = ep_dict[x]['cell_type'][-1]
+    cell_vt = ep_dict[x]['cell_type'][2]
+    
+    # Get VT suffix from cell_dict
+    idx_to_vt = cell_dict[str(cell_idx)].get('idx_to_vt', {0: 'SL', 1: 'L', 2: 'R'})
+    vt_suffix = idx_to_vt.get(cell_vt, 'SL')
+    
     # Format example: AND2x2_ASAP7_75t_R
-    cell_name = cell_dict[str(cell_idx)]['name']+\
-                cell_dict[str(cell_idx)]['sizes'][cell_size]+\
-                  "_ASAP7_75t_"+\
-                  "SL"
-                  # cell_dict[str(cell_idx)][cell_vt]
+    cell_name = (cell_dict[str(cell_idx)]['name'] +
+                cell_dict[str(cell_idx)]['unique_sizes'][cell_size] +
+                "_ASAP7_75t_" + vt_suffix)
     cells.append(cell_name)
   return cells
 
@@ -834,6 +907,12 @@ def build_cell_dict_from_openroad(db, timing):
   for lib in libs:
     masters.extend(lib.getMasters())
   
+  # VT mapping: SLVT (slowest/lowest power) -> LVT -> RVT (fastest/highest power)
+  # Note: Actual suffixes may vary (SL, L, R or SLVT, LVT, RVT)
+  VT_ORDER = ['SL', 'SLVT', 'L', 'LVT', 'R', 'RVT']
+  VT_TO_IDX = {'SL': 0, 'SLVT': 0, 'L': 1, 'LVT': 1, 'R': 2, 'RVT': 2}
+  IDX_TO_VT = {0: 'SL', 1: 'L', 2: 'R'}  # Use short form for output
+  
   # Group cells by base name (without size suffix)
   cell_groups = defaultdict(list)
   
@@ -843,7 +922,7 @@ def build_cell_dict_from_openroad(db, timing):
     if any(x in master_name.upper() for x in ["FILL", "DECAP", "ANTENNA", "TAP"]):
       continue
     
-    # Extract base name and size for ASAP7 cells (e.g., "INVx2_ASAP7_75t_R" -> "INV", "x2")
+    # Extract base name and size for ASAP7 cells (e.g., "INVx2_ASAP7_75t_R" -> "INV", "x2", "R")
     # Pattern: <CELLNAME>x<SIZE>[suffix]_ASAP7_75t_<VT>
     # Supports formats like: INVx2, BUFx16f (where 'f' = faster variant)
     match = re.match(r'([A-Za-z0-9_]+?)(x[p0-9]+(?:p[0-9]+)?[a-z]?)_ASAP7_75t_(.*)', master_name)
@@ -874,46 +953,61 @@ def build_cell_dict_from_openroad(db, timing):
       return float(size_str)
   
   for idx, (base_name, cells) in enumerate(sorted(cell_groups.items())):
-    # Sort cells by size
-    cells_sorted = sorted(cells, key=lambda x: parse_size(x[0]))
+    # Sort cells by (size, VT) to organize systematically
+    # First by size, then by VT order
+    cells_sorted = sorted(cells, key=lambda x: (parse_size(x[0]), VT_TO_IDX.get(x[2], 999)))
     
     sizes = []
     sizesi = []
+    vt_types = []  # Store VT variants for each size
     c_in_list = []
     out_pin = None
-    vt_corners = []
     
+    # Group by unique sizes to identify VT variants per size
+    size_vt_map = defaultdict(list)
     for size_suffix, master, vt_corner in cells_sorted:
-      sizes.append(size_suffix)
-      # Extract numeric size
-      size_num = parse_size(size_suffix)
-      sizesi.append(size_num)
-      vt_corners.append(vt_corner)
+      size_vt_map[size_suffix].append((vt_corner, master))
+    
+    # Build lists maintaining consistent VT ordering
+    for size_suffix in sorted(size_vt_map.keys(), key=parse_size):
+      vt_list = size_vt_map[size_suffix]
+      # Sort VT variants in order: SLVT(0), LVT(1), RVT(2)
+      vt_list_sorted = sorted(vt_list, key=lambda x: VT_TO_IDX.get(x[0], 999))
       
-      # Get output pin name
-      if out_pin is None:
-        for mterm in master.getMTerms():
-          io_type = mterm.getIoType()
-          # Handle both string and enum types
-          io_type_str = io_type if isinstance(io_type, str) else str(io_type)
-          if "OUTPUT" in io_type_str:
-            out_pin = "/" + mterm.getName()
-            break
-      
-      # Note: Input capacitance values (c_in) are not extracted here as they require
-      # timing library information that's better obtained during actual timing analysis.
-      # Using placeholder 0.0 - the actual values aren't critical for gate sizing algorithm
-      c_in_list.append(0.0)
+      for vt_corner, master in vt_list_sorted:
+        sizes.append(size_suffix)
+        sizesi.append(parse_size(size_suffix))
+        vt_types.append(VT_TO_IDX.get(vt_corner, 0))
+        
+        # Get output pin name
+        if out_pin is None:
+          for mterm in master.getMTerms():
+            io_type = mterm.getIoType()
+            io_type_str = io_type if isinstance(io_type, str) else str(io_type)
+            if "OUTPUT" in io_type_str:
+              out_pin = "/" + mterm.getName()
+              break
+        
+        c_in_list.append(0.0)
+    
+    # Determine unique sizes and VT variants
+    unique_sizes = sorted(set(sizes), key=lambda x: parse_size(x))
+    unique_vts = sorted(set(vt_types))
     
     # Store in cell_dict
     cell_dict[str(idx)] = {
       "name": base_name,
-      "sizes": sizes,
+      "sizes": sizes,  # All combinations of (size, VT)
       "sizesi": sizesi,
-      "n_sizes": len(sizes),
-      "out_pin": out_pin if out_pin else "/Y",  # Default to /Y for ASAP7
+      "vt_types": vt_types,  # VT index for each entry
+      "unique_sizes": unique_sizes,  # Unique size variants
+      "unique_vts": unique_vts,  # Available VT variants
+      "n_sizes": len(unique_sizes),  # Number of unique sizes
+      "n_vts": len(unique_vts),  # Number of VT variants
+      "out_pin": out_pin if out_pin else "/Y",
       "c_in": c_in_list,
-      # "vt_corners": vt_corners
+      "vt_to_idx": VT_TO_IDX,
+      "idx_to_vt": IDX_TO_VT
     }
     
     cell_name_dict[base_name] = str(idx)
@@ -1002,16 +1096,16 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
         m_inst = i_inst.getMaster()
         # Calculate area from physical dimensions
         area = m_inst.getWidth() * m_inst.getHeight()
+        cell_type_tuple = get_type(cell_type, cell_dict, cell_name_dict)
         inst_dict[inst_name] = {
           'idx':len(inst_dict),
           'cell_type_name':cell_type,
-          'cell_type':get_type(cell_type, cell_dict, cell_name_dict),
+          'cell_type': cell_type_tuple,  # Now returns (cell_idx, size_idx, vt_idx)
           'slack':0,
           'slew':0,
           'load':0,
           'cin':0,
           'area': area,
-          # 'vt': vt
           }
       if s_iterm.isInputSignal():
         # Input pin: this is a destination (sink) in the graph

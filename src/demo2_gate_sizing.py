@@ -133,7 +133,8 @@ inst_names = {v['idx']:k for k,v in inst_dict.items()}
 # create DGL graph
 # Grpah config: undirected graph, edges from srcs to dsts and dsts to srcs (for message passing in both directions)
 G = dgl.graph((srcs+dsts,dsts+srcs))
-# store the featues for cell types, slack, slew, load, area, and max_size_index(for validity checks)
+# store the features for cell types, slack, slew, load, area, max_size_index, and max_vt (for validity checks)
+# cell_types now has shape (N, 3): [cell_idx, size_idx, vt_idx]
 G.ndata['cell_types'] = torch.tensor([ inst_dict[x]['cell_type'] for x in inst_names.values() ])
 G.ndata['slack'] = torch.tensor(
   [ inst_dict[x]['slack'] for x in inst_names.values() ])
@@ -143,6 +144,8 @@ G.ndata['load'] = torch.tensor(
   [ inst_dict[x]['load'] for x in inst_names.values() ])
 G.ndata['area'] = torch.tensor([ inst_dict[x]['area'] for x in inst_names.values() ])
 G.ndata['max_size'] = torch.tensor([cell_dict[str(inst_dict[x]['cell_type'][0])]['n_sizes'] for x in inst_names.values()])
+# Add max_vt for VT switching actions (max VT index is 2 for RVT)
+G.ndata['max_vt'] = torch.tensor([max(cell_dict[str(inst_dict[x]['cell_type'][0])].get('unique_vts', [2])) for x in inst_names.values()])
 G.edata['types'] = torch.cat((torch.zeros(len(srcs),dtype=torch.long),torch.ones(len(dsts),dtype=torch.long)),0)
 # normalization parameters
 norm_data = {
