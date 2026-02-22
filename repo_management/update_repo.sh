@@ -10,6 +10,7 @@
 #   Then fetch/pull the latest changes from Contest_remote/main as per the first argument.
 
 #!/bin/bash
+umask 000
 REMOTE_NAME="Contest_remote"
 REMOTE_URL="https://github.com/ABKGroup/ISPD26-Contest.git"
 BRANCH_NAME="main"
