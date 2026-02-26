@@ -377,8 +377,12 @@ for i_episode in range(num_episodes):
     #output log#
     ############
     if t%MAX_STEPS == MAX_STEPS -1:
-      print(f"WNS updated: {max_WNS:.4e}")
-      print(f"TNS updated: {max_TNS:.4e}")
+      print(f"WNS updated: {max_WNS * norm_data['clk_period']:.4e}")
+      print(f"TNS updated: {max_TNS * norm_data['clk_period']:.4e}")
+      run_gr(ord_design)
+      ord_design.evalTclString("report_tns")
+      ord_design.evalTclString("report_wns")
+      
     #st = time()
 
     old_WNS = new_WNS
@@ -443,6 +447,10 @@ for inst_name, master_name in zip(inst_names.values(), best_cells):
 
 print(time() - restore_start_time, "seconds for restoring best-known configuration")
 
+# ord_design.evalTclString("estimate_parasitics -placement")
+# ord_design.evalTclString("report_tns")
+# ord_design.evalTclString("report_wns")
+
 dp_start_time = time()
 print("=== Running detailed placement ===")
 # Run detailed placement to legalize the design after gate sizing
@@ -452,12 +460,44 @@ print("=== Running detailed placement ===")
 try:
   # ord_design.getOpendp().detailedPlacement(max_disp_x, max_disp_y)
   ord_design.evalTclString("detailed_placement")
+  # Re-estimate parasitics after placement (wire lengths changed) before querying timing
+  # ord_design.evalTclString("estimate_parasitics -placement")
+  # evalTclString() in Python (-python) mode returns TCL output as a string;
+  # # it is NOT automatically forwarded to Python stdout, so print() is required.
+  # print("Post-DP WNS:", ord_design.evalTclString("report_wns"))
+  # print("Post-DP TNS:", ord_design.evalTclString("report_tns"))
   # ord_design.getOpendp().detailedPlacement()
 except Exception as e:
   print("[WARN] detailedPlacement failed (DPL):", e)
   print("You can inspect OpenROAD console output for 'DPL-0036' details.")
   # Continue without failing so final outputs can still be written.
 print(time() - dp_start_time, "seconds for detailed placement")
+
+# print("=== Running global routing ===")
+# gr_start_time = time()
+# # Set routing layers (M2-M9 by default)
+# ord_design.evalTclString("set_routing_layers -signal M2-M9 -clock M2-M9")
+# # Try global routing with error handling
+# gr_result = ord_design.evalTclString(
+#     "catch { global_route -skip_large_fanout_nets 300 -allow_congestion } gr_err"
+# )
+# if gr_result == "1":
+#     print("[INFO] Global route failed on first attempt, retrying after detailed placement...")
+#     ord_design.evalTclString("detailed_placement")
+#     gr_result2 = ord_design.evalTclString(
+#         "catch { global_route -skip_large_fanout_nets 300 -allow_congestion } gr_err2"
+#     )
+#     if gr_result2 == "1":
+#         print("[WARN] Global route still failing, using placement-based parasitics")
+#         ord_design.evalTclString("estimate_parasitics -placement")
+#     else:
+#         ord_design.evalTclString("estimate_parasitics -global_routing")
+# else:
+#     ord_design.evalTclString("estimate_parasitics -global_routing")
+# print(time() - gr_start_time, "seconds for global routing")
+run_gr(ord_design)
+ord_design.evalTclString("report_tns")
+ord_design.evalTclString("report_wns")
 
 print("=== Writing final output files ===")
 # Output def and verilog

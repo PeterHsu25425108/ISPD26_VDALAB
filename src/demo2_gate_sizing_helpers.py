@@ -448,6 +448,10 @@ def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
       inst.swapMaster(n_master)
     except Exception as e:
       print(f"[EXCEPTION] swapMaster failed for instance '{inst_name}' to master '{n_master_name}': {e}")
+  
+  # Update parasitics after gate sizing for accurate timing evaluation
+  ord_design.evalTclString("estimate_parasitics -placement")
+  
   dbpin = block.findITerm(inst_name + cell_dict[str(inst_dict[inst_name]['cell_type'][0])]['out_pin'])
   new_slack = min_slack(dbpin, timing)
 
@@ -542,6 +546,9 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
       episode_inst_dict[inst_name]['area']= o_master.getWidth() * o_master.getHeight()
       new_area = episode_inst_dict[inst_name]['area']/ norm_data['max_area']
       episode_G.ndata['area'][i] = new_area
+
+  # Update parasitics after resetting gates for accurate timing evaluation
+  ord_design.evalTclString("estimate_parasitics -placement")
 
   #if reset_state is not None:
   new_slacks = torch.zeros(len(episode_inst_dict.keys()))
@@ -642,7 +649,7 @@ BUF_SIZE = 1500#10000
 STOP_BADS = 50
 MAX_STEPS = 50#150#200 c432#51#300
 TARGET_UPDATE = MAX_STEPS*25 #MAX_STEPS*5
-EPISODE = 2 #150 # c880 #50 c432 #15#200
+EPISODE = 30 #150 # c880 #50 c432 #15#200
 LOADTH = 0
 DELTA = 0.000001
 UPDATE_STOP = 250
@@ -1145,4 +1152,26 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
   print(f"Total graph edges: {len(srcs)}")
   return inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict
 
-
+def run_gr(ord_design):
+  print("=== Running global routing ===")
+  gr_start_time = time()
+  # Set routing layers (M2-M9 by default)
+  ord_design.evalTclString("set_routing_layers -signal M2-M9 -clock M2-M9")
+  # Try global routing with error handling
+  gr_result = ord_design.evalTclString(
+      "catch { global_route -skip_large_fanout_nets 300 -allow_congestion } gr_err"
+  )
+  if gr_result == "1":
+      print("[INFO] Global route failed on first attempt, retrying after detailed placement...")
+      ord_design.evalTclString("detailed_placement")
+      gr_result2 = ord_design.evalTclString(
+          "catch { global_route -skip_large_fanout_nets 300 -allow_congestion } gr_err2"
+      )
+      if gr_result2 == "1":
+          print("[WARN] Global route still failing, using placement-based parasitics")
+          ord_design.evalTclString("estimate_parasitics -placement")
+      else:
+          ord_design.evalTclString("estimate_parasitics -global_routing")
+  else:
+      ord_design.evalTclString("estimate_parasitics -global_routing")
+  print(time() - gr_start_time, "seconds for global routing")

@@ -18,6 +18,10 @@ BENCHMARK_DIR="./Benchmarks"
 # Function to process a single case
 process_case() {
     local design_name="$1"
+    export LOG_FILE="output_file/${design_name}/runtime_msg.log"
+    
+    # Create log directory if it doesn't exist
+    mkdir -p $(dirname "$LOG_FILE")
     
     # Take the substr of design_name before "_v2" to be top_module
     local top_module=${design_name%%_v2*}
@@ -41,7 +45,7 @@ process_case() {
 
     echo " ===== Running design: $design_name ====== "
     
-    bash run.sh "$input_dir" "$platform_dir" "$output_dir" "$top_module" | tee log_file/${design_name}/runtime_msg.log
+    bash run.sh "$input_dir" "$platform_dir" "$output_dir" "$top_module" | tee ${LOG_FILE}
 }
 
 # Check if a specific design name is provided
