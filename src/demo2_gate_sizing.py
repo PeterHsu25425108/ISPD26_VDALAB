@@ -376,6 +376,9 @@ for i_episode in range(num_episodes):
     if t%MAX_STEPS == MAX_STEPS -1:
       print(f"WNS updated: {max_WNS:.4e}")
       print(f"TNS updated: {max_TNS:.4e}")
+      run_gr(ord_design)
+      ord_design.evalTclString("report_tns")
+      ord_design.evalTclString("report_wns")
     #st = time()
 
     old_WNS = new_WNS
@@ -456,10 +459,7 @@ except Exception as e:
   # Continue without failing so final outputs can still be written.
 print(time() - dp_start_time, "seconds for detailed placement")
 
-print("=== Writing final output files ===")
-# Output def and verilog
-os.makedirs(os.path.dirname(f"{output_dir}/"), exist_ok=True)
-print(f"{output_dir}/{design_name}.def")
-print(f"write_verilog {output_dir}/{design_name}.v")
-ord_design.writeDef(f"{output_dir}/{design_name}.def")
-ord_design.evalTclString(f"write_verilog {output_dir}/{design_name}.v")
+
+run_gr(ord_design)
+ord_design.evalTclString("report_tns")
+ord_design.evalTclString("report_wns")

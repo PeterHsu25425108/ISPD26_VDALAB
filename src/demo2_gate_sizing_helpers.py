@@ -569,7 +569,7 @@ BUF_SIZE = 1500#10000
 STOP_BADS = 50
 MAX_STEPS = 50#150#200 c432#51#300
 TARGET_UPDATE = MAX_STEPS*25 #MAX_STEPS*5
-EPISODE = 2 #150 # c880 #50 c432 #15#200
+EPISODE = 30 #150 # c880 #50 c432 #15#200
 LOADTH = 0
 DELTA = 0.000001
 UPDATE_STOP = 250
@@ -678,10 +678,10 @@ def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   ord_design.evalTclString("repair_design")
   print(time() - ERC_fix_start_time, "seconds for ERC fix")
 
-  print("=== Running timing repair ===")
-  timing_fix_start_time = time()
-  ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
-  print(time() - timing_fix_start_time, "seconds for timing repair")
+  # print("=== Running timing repair ===")
+  # timing_fix_start_time = time()
+  # ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
+  # print(time() - timing_fix_start_time, "seconds for timing repair")
   
   # report tns and wns after repair
   tns = ord_design.evalTclString("report_tns")
@@ -1051,4 +1051,26 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
   print(f"Total graph edges: {len(srcs)}")
   return inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict
 
-
+def run_gr(ord_design):
+  print("=== Running global routing ===")
+  gr_start_time = time()
+  # Set routing layers (M2-M9 by default)
+  ord_design.evalTclString("set_routing_layers -signal M2-M9 -clock M2-M9")
+  # Try global routing with error handling
+  gr_result = ord_design.evalTclString(
+      "catch { global_route -skip_large_fanout_nets 300 -allow_congestion } gr_err"
+  )
+  if gr_result == "1":
+      print("[INFO] Global route failed on first attempt, retrying after detailed placement...")
+      ord_design.evalTclString("detailed_placement")
+      gr_result2 = ord_design.evalTclString(
+          "catch { global_route -skip_large_fanout_nets 300 -allow_congestion } gr_err2"
+      )
+      if gr_result2 == "1":
+          print("[WARN] Global route still failing, using placement-based parasitics")
+          ord_design.evalTclString("estimate_parasitics -placement")
+      else:
+          ord_design.evalTclString("estimate_parasitics -global_routing")
+  else:
+      ord_design.evalTclString("estimate_parasitics -global_routing")
+  print(time() - gr_start_time, "seconds for global routing")
