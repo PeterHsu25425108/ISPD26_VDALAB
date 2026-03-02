@@ -164,26 +164,34 @@ def pin_properties(dbpin, clk_period, ord_design, timing):
   
   How data is obtained from OpenROAD:
   1. Uses timing.getPinSlack() to get slack from OpenSTA timing engine
+     NOTE: getPinSlack() returns raw seconds (OpenSTA internal unit).
+     Multiply by 1e9 to convert to nanoseconds to match avg_clk_period.
   2. Uses timing.getPinSlew() to get signal transition time
   3. Uses timing.getPortCap() to calculate total load capacitance
   
   Args:
     dbpin: OpenDB pin object (ITerm) to query
-    clk_period: Clock period for normalization (ns)
+    clk_period: Clock period for normalization (ns, from `get_property period`)
     ord_design: OpenROAD Design object
     timing: OpenROAD Timing object (OpenSTA)
     
   Returns:
-    tuple: (slack, slew, load) - timing properties for the pin
+    tuple: (slack, slew, load) — slack in ns (clamped to [-0.5*clk_period, ∞]),
+           normalized for use in graph node features as (slack / clk_period)
   """
   ITerms = dbpin.getNet().getITerms()
   
   # Get slack from OpenROAD timing engine (OpenSTA)
   # slack = required_time - arrival_time (negative means timing violation)
-  # Query both rise and fall slack, take the worst (minimum)
-  slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max), timing.getPinSlack(dbpin, timing.Rise, timing.Max))
-  if slack < -0.5*clk_period:
-    slack = 0
+  # Query both rise and fall slack, take the worst (minimum).
+  # NOTE: Timing.getPinSlack() returns raw OpenSTA internal time in SECONDS.
+  # avg_clk_period (and all downstream normalization) is in NANOSECONDS
+  # (from `get_property period` which respects `set_cmd_units -time ns`).
+  # Multiply by 1e9 to convert s → ns so units are consistent.
+  slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max),
+              timing.getPinSlack(dbpin, timing.Rise, timing.Max)) * 1e9
+  # if slack < -0.5*clk_period:
+  #   slack = -0.5*clk_period  # clamp to bound, do NOT zero out (zeroing hides violations)
   
   # Get slew (transition time) from OpenROAD timing engine
   slew = timing.getPinSlew(dbpin)  
@@ -204,7 +212,9 @@ def pin_properties(dbpin, clk_period, ord_design, timing):
   return slack, slew, load
 
 def min_slack(dbpin, timing):
-  slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max), timing.getPinSlack(dbpin, timing.Rise, timing.Max))
+  # Returns min slack in NANOSECONDS (getPinSlack is in seconds internally; *1e9 converts)
+  slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max),
+              timing.getPinSlack(dbpin, timing.Rise, timing.Max)) * 1e9
   return slack
 
 def generate_masked_actions(graph):
@@ -377,7 +387,7 @@ def get_state(graph, n_state, n_cells, n_features):
 
 def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
             cell_dict, norm_data, inst_names, episode_inst_dict, inst_dict,\
-            n_cells, n_features, block, device, Slack_Lambda, eps):
+            n_cells, n_features, block, device, Slack_Lambda, eps, endpoint_iterms=None):
   next_state = state.clone()
   reward = 0
   done =0
@@ -397,7 +407,20 @@ def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
   
   dbpin = block.findITerm(inst_name + cell_dict[str(inst_dict[inst_name]['cell_type'][0])]['out_pin'])
   old_slack = min_slack(dbpin, timing)
-  
+
+  # Compute old endpoint TNS before cell swap — queries FF input-pin slacks directly,
+  # matching the methodology of OpenROAD's report_tns (sum of negative endpoint path slacks).
+  old_endpoint_tns = 0.0
+  if endpoint_iterms:
+    for _ep_name in endpoint_iterms:
+      _ep_iterm = block.findITerm(_ep_name)
+      if _ep_iterm is not None and _ep_iterm.getNet() is not None:
+        # getPinSlack returns seconds; *1e9 to convert to ns (matching avg_clk_period units)
+        _s = min(timing.getPinSlack(_ep_iterm, timing.Fall, timing.Max),
+                 timing.getPinSlack(_ep_iterm, timing.Rise, timing.Max)) * 1e9
+        if _s < 0:
+          old_endpoint_tns += _s
+
   # Apply action to modify cell configuration
   new_cell_size = cell_size
   new_cell_vt = cell_vt
@@ -497,16 +520,26 @@ def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
                                   / norm_data['max_load']
   next_state[torch.isinf(next_state[:,-2]),-2] = 1 # remove infinity from primary outputs. hadle it better.
 
-  #Check TNS
-  new_TNS = torch.min(new_slacks,torch.zeros_like(new_slacks))
-  new_TNS = Slack_Lambda*new_TNS
-
-  old_TNS = torch.min(old_slacks,torch.zeros_like(old_slacks))
-  old_TNS = Slack_Lambda*old_TNS
-
-  factor = torch.max(torch.abs(0.1*old_TNS), eps*torch.ones_like(old_TNS))
-  factor = torch.max(torch.ones_like(old_TNS), 1/factor)
-  reward += (torch.sum((new_TNS - old_TNS) * factor)).item()
+  # Compute new endpoint TNS after cell swap + estimate_parasitics.
+  # This directly matches OpenROAD's report_tns: sum of negative setup-slack values
+  # at timing path endpoints (FF data-input pins).
+  new_endpoint_tns = 0.0
+  if endpoint_iterms:
+    for _ep_name in endpoint_iterms:
+      _ep_iterm = block.findITerm(_ep_name)
+      if _ep_iterm is not None and _ep_iterm.getNet() is not None:
+        # getPinSlack returns seconds; *1e9 to convert to ns (matching avg_clk_period units)
+        _s = min(timing.getPinSlack(_ep_iterm, timing.Fall, timing.Max),
+                 timing.getPinSlack(_ep_iterm, timing.Rise, timing.Max)) * 1e9
+        if _s < 0:
+          new_endpoint_tns += _s
+    reward += (new_endpoint_tns - old_endpoint_tns)
+  else:
+    # Fallback: full-graph slack delta when no endpoint list provided
+    new_TNS = torch.sum(torch.min(episode_G.ndata['slack'].to('cpu') * norm_data['clk_period'],
+                                  torch.zeros(episode_G.num_nodes())))
+    old_TNS = torch.sum(torch.min(old_slacks, torch.zeros_like(old_slacks)))
+    reward += (new_TNS - old_TNS).item()
 
   return reward, done, next_state, episode_inst_dict, episode_G
 
@@ -758,10 +791,10 @@ def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   ord_design.evalTclString("repair_design")
   print(time() - ERC_fix_start_time, "seconds for ERC fix")
 
-  print("=== Running timing repair ===")
-  timing_fix_start_time = time()
-  ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
-  print(time() - timing_fix_start_time, "seconds for timing repair")
+  # print("=== Running timing repair ===")
+  # timing_fix_start_time = time()
+  # ord_design.evalTclString("repair_timing -setup -skip_gate_cloning -skip_pin_swap ")
+  # print(time() - timing_fix_start_time, "seconds for timing repair")
   
   # report tns and wns after repair
   tns = ord_design.evalTclString("report_tns")
@@ -1068,6 +1101,8 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
   fanout_dict = {}
   #storing all the endpoints(here they are flipflops)
   endpoints = []
+  # ITerm name strings for all FF data-input endpoint pins (for endpoint-based TNS, like OpenROAD report_tns)
+  endpoint_iterms = []
   
   # Traverse all nets using OpenDB API
   print(f"Starting netlist traversal...")
@@ -1117,8 +1152,16 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
       if s_iterm.isInputSignal():
         # Input pin: this is a destination (sink) in the graph
         net_dsts.append((inst_dict[inst_name]['idx'],term_name))
-        if inst_dict[inst_name]['cell_type'][0] == 16: # check for flipflops
+        # Identify sequential cells (timing endpoints) by cell base name rather than a
+        # hardcoded index, since the index is assigned alphabetically at runtime.
+        # ASAP7 SEQ lib contains: DFF* (flip-flops), SDFH*/SDFL* (scan FFs),
+        # DHL*/DLL* (latches), ICG* (clock gating, EN pin has setup constraint).
+        # All have at least one input pin with a setup timing constraint -> timing endpoint.
+        _cell_base_name = cell_dict[str(inst_dict[inst_name]['cell_type'][0])]['name']
+        if _cell_base_name.startswith(('DFF', 'SDFH', 'SDFL', 'DHL', 'DLL', 'ICG')):
           endpoints.append(inst_dict[inst_name]['idx'])
+          # Store ITerm name for direct endpoint slack query (matches OpenROAD report_tns)
+          endpoint_iterms.append(term_name)
       elif s_iterm.isOutputSignal():
         # Output pin: this is a source (driver) in the graph
         net_srcs.append((inst_dict[inst_name]['idx'],term_name))
@@ -1150,7 +1193,8 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
   print(f"Total instances: {len(inst_dict)}")
   print(f"Total endpoints (flip-flops): {len(endpoints)}")
   print(f"Total graph edges: {len(srcs)}")
-  return inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict
+  print(f"Total endpoint ITerm pins (FF inputs): {len(endpoint_iterms)}")
+  return inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict, endpoint_iterms
 
 def run_gr(ord_design):
   print("=== Running global routing ===")

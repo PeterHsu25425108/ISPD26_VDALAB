@@ -123,7 +123,7 @@ ord_tech, ord_design, timing, db, chip, block, nets, cell_dict, cell_name_dict, 
 #   - timing.getPinSlew(): Get signal transition times
 #   - timing.getPortCap(): Get load capacitances
 # These timing values are stored in inst_dict and later used to populate the DGL graph
-inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict = \
+inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict, endpoint_iterms = \
 iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict, avg_clk_period)
 ################################################
 #quick lookup for the instance name from the ID#
@@ -204,8 +204,22 @@ episode_durations = []
 episode_inst_dict = copy.deepcopy(inst_dict)
 episode_G = copy.deepcopy(G)
 
+# Endpoint-only TNS in nanoseconds (matches OpenROAD report_tns)
+def compute_endpoint_tns_ns(block, timing, endpoint_iterms):
+  tns = 0.0
+  for _ep_name in endpoint_iterms:
+    _ep_iterm = block.findITerm(_ep_name)
+    if _ep_iterm is None or _ep_iterm.getNet() is None:
+      continue
+    _s = min(timing.getPinSlack(_ep_iterm, timing.Fall, timing.Max),
+             timing.getPinSlack(_ep_iterm, timing.Rise, timing.Max)) * 1e9
+    if _s < 0:
+      tns += _s
+  return tns
+
 print("Worst Negative slack initial:", torch.min(episode_G.ndata['slack']).cpu().numpy()*norm_data['clk_period'])
-print("Total Negative slack initial:", torch.sum(torch.min(episode_G.ndata['slack'],torch.zeros_like(episode_G.ndata['slack']))).cpu().numpy())
+print("Total Negative slack initial (all nodes, normalized units):", torch.sum(torch.min(episode_G.ndata['slack'],torch.zeros_like(episode_G.ndata['slack']))).cpu().numpy())
+print("Endpoint TNS initial (ns):", compute_endpoint_tns_ns(block, timing, endpoint_iterms))
 print("##############################################")
 episode_reward = []
 update_loss = []
@@ -247,11 +261,18 @@ for i_episode in range(num_episodes):
   #get current WNS, TNS, area#
   ############################
   old_WNS = torch.min(episode_G.ndata['slack'])
-  old_TNS = torch.sum(torch.min(episode_G.ndata['slack'], torch.zeros_like(episode_G.ndata['slack'])))
+  # Endpoint-only TNS in ns for logging (aligns with report_tns)
+  endpoint_TNS_ns = compute_endpoint_tns_ns(block, timing, endpoint_iterms)
   old_area = torch.sum(episode_G.ndata['area'])
-  episode_TNS = old_TNS
-  episode_WNS = old_WNS
+  # Convert WNS to ns (graph-based min slack) and use endpoint-based TNS in ns
+  episode_TNS = endpoint_TNS_ns
+  episode_WNS = old_WNS.item() * norm_data['clk_period']
   episode_area = old_area
+  # Track best metrics within this episode (avoid cross-episode masking of trends)
+  episode_best_WNS = episode_WNS
+  episode_best_TNS = episode_TNS
+  current_WNS = episode_WNS
+  current_TNS = episode_TNS
   for t in trange(MAX_STEPS):
     ##############################
     #select and perform an action#
@@ -286,7 +307,7 @@ for i_episode in range(num_episodes):
     ###############################################
     reward, done_env, next_state, episode_inst_dict, episode_G  = env_step(episode_G, critical_graph,\
         state, action.item(), avg_clk_period, ord_design, timing, cell_dict, norm_data, inst_names,\
-        episode_inst_dict, inst_dict, n_cells, n_features, block, device, Slack_Lambda, eps)
+        episode_inst_dict, inst_dict, n_cells, n_features, block, device, Slack_Lambda, eps, endpoint_iterms)
     if t%10 == 9:
       print("Updating cell size in the DB. Recalculating timing results.")
     reward = torch.tensor([reward], device=device, dtype=torch.float32)
@@ -334,19 +355,17 @@ for i_episode in range(num_episodes):
                                               policy_net, target_net, optimizer, loss_history)
 
     if next_state != None:
-      new_slacks = np.array([x['slack'] for x in episode_inst_dict.values()])/norm_data['clk_period']
-      new_slacks[np.isinf(new_slacks)] = 1
-      for i in range(len(new_slacks)):
-        if new_slacks[i] > float(1):
-          new_slacks[i] = 1  
-      new_slacks = np.minimum(new_slacks,np.zeros_like(new_slacks))
-      new_WNS = np.min(new_slacks)
-      new_TNS = np.sum(new_slacks)
-      if new_WNS >max_WNS:
-        max_WNS = new_WNS
+      # Compute WNS from the full updated timing graph (episode_G), de-normalized to ns.
+      _g_slack_ns = episode_G.ndata['slack'].to('cpu') * norm_data['clk_period']
+      current_WNS = torch.min(_g_slack_ns).item()
+      # Compute TNS on endpoints only (matches OpenROAD report_tns units = ns)
+      current_TNS = compute_endpoint_tns_ns(block, timing, endpoint_iterms)
 
-      if new_TNS >max_TNS:
-        max_TNS = new_TNS
+      if current_WNS > episode_best_WNS:
+        episode_best_WNS = current_WNS
+
+      if current_TNS > episode_best_TNS:
+        episode_best_TNS = current_TNS
       
       working_area = new_area*norm_data['max_area']/(unit_micron*unit_micron)
       point_time = time()
@@ -361,15 +380,14 @@ for i_episode in range(num_episodes):
       if cost<best_cost:
         best_cost = cost
         reset_state = get_state_cells(episode_inst_dict, inst_names, cell_dict)
-      if new_TNS > episode_TNS:
-        episode_TNS = new_TNS
-      if new_WNS> episode_WNS:
-        episode_WNS = new_WNS
+      episode_TNS = max(episode_TNS, current_TNS)
+      if current_WNS > episode_WNS:
+        episode_WNS = current_WNS
       if new_area < episode_area:
         episode_area = new_area
     else:
-      new_WNS = torch.FloatTensor([0])
-      new_TNS = torch.FloatTensor([0])
+      current_WNS = 0.0
+      current_TNS = 0.0
 
     if t%10 == 9 :
       Slack_Lambda = update_lambda(Slack_Lambda, episode_G.ndata['slack'].to('cpu'), K)
@@ -377,16 +395,18 @@ for i_episode in range(num_episodes):
     #output log#
     ############
     if t%MAX_STEPS == MAX_STEPS -1:
-      print(f"WNS updated: {max_WNS * norm_data['clk_period']:.4e}")
-      print(f"TNS updated: {max_TNS * norm_data['clk_period']:.4e}")
+      print(f"WNS current (ns): {current_WNS:.4e}")
+      print(f"TNS current (ns): {current_TNS:.4e}")
+      print(f"WNS best in episode (ns): {episode_best_WNS:.4e}")
+      print(f"TNS best in episode (ns): {episode_best_TNS:.4e}")
       run_gr(ord_design)
       ord_design.evalTclString("report_tns")
       ord_design.evalTclString("report_wns")
       
     #st = time()
 
-    old_WNS = new_WNS
-    old_TNS = new_TNS
+    old_WNS = current_WNS
+    old_TNS = current_TNS
 
     # Move to the next state
     if done:
@@ -398,7 +418,7 @@ for i_episode in range(num_episodes):
         if len(loss_history)>0:
           update_loss.append(loss_history[-1])
           update_step.append(len(loss_history)-1)
-  data_v_episode.append((float(episode_TNS*norm_data['clk_period']),float(episode_WNS*norm_data['clk_period']), float(episode_area*norm_data['max_area'] )))
+  data_v_episode.append((float(episode_TNS), float(episode_WNS), float(episode_area*norm_data['max_area'] )))
   episode_reward.append(cumulative_reward.item())
   critical_nodes = get_critical_path_nodes(episode_G, i_episode, TOP_N_NODES, n_cells)
 
