@@ -46,6 +46,9 @@ process_case() {
     echo " ===== Running design: $design_name ====== "
     
     bash run.sh "$input_dir" "$platform_dir" "$output_dir" "$top_module" | tee ${LOG_FILE}
+
+    # for profiling, uncomment the following line and comment out the above line
+    openroad -exit -python -m cProfile -o "output_file/${design_name}/program.prof" src/demo2_gate_sizing.py "$input_dir" "$platform_dir" "$output_dir" "$top_module"
 }
 
 # Check if a specific design name is provided

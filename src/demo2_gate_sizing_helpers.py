@@ -50,6 +50,40 @@ from pathlib import Path
 import sys
 import glob
 from glob import glob
+import re
+import math
+
+# Clamp large-but-finite float64 slack values to float32-representable range.
+# OpenSTA returns huge positive values (~1e30 s) for unconstrained pins; after
+# ×1e9 (s→ns) these exceed float32 max (~3.4e38) and cause a RuntimeError when
+# assigned to a torch.zeros() (float32) tensor. float('inf') IS valid float32
+# and is already handled downstream by episode_G.ndata['slack'][isinf] = 1.
+_FLOAT32_MAX = 3.4028235e38
+def _safe_f32(val: float) -> float:
+    """Return val clamped to float32 range; overflowing finite values → ±inf."""
+    if not math.isfinite(val):
+        return val
+    return val if abs(val) <= _FLOAT32_MAX else math.copysign(float('inf'), val)
+
+# ---------------------------------------------------------------------------
+# C++ acceleration module (pybind11)
+# Build with:  python3 src/netlist_utils/setup_netlist_utils.py
+# The .so is placed in src/netlist_utils/ and loaded from there.
+# Falls back to pure-Python implementations when the .so is absent.
+# ---------------------------------------------------------------------------
+try:
+    import sys as _sys, os as _os
+    _HERE = _os.path.dirname(_os.path.abspath(__file__))
+    _NETLIST_UTILS_DIR = _os.path.join(_HERE, "netlist_utils")
+    if _NETLIST_UTILS_DIR not in _sys.path:
+        _sys.path.insert(0, _NETLIST_UTILS_DIR)
+    import netlist_utils as _netlist_utils_cpp
+    _USE_CPP = True
+    print("[netlist_utils] C++ acceleration module loaded successfully.")
+except ImportError as _e:
+    _netlist_utils_cpp = None
+    _USE_CPP = False
+    print(f"[netlist_utils] C++ module not available ({_e}); using pure-Python fallback.")
 
 # replay memory
 class ReplayMemory(object):
@@ -161,61 +195,46 @@ def get_type(cell_type, cell_dict, cell_name_dict):
 def pin_properties(dbpin, clk_period, ord_design, timing):
   """
   Extracts timing properties from OpenROAD for a given pin.
-  
-  How data is obtained from OpenROAD:
-  1. Uses timing.getPinSlack() to get slack from OpenSTA timing engine
-     NOTE: getPinSlack() returns raw seconds (OpenSTA internal unit).
-     Multiply by 1e9 to convert to nanoseconds to match avg_clk_period.
-  2. Uses timing.getPinSlew() to get signal transition time
-  3. Uses timing.getPortCap() to calculate total load capacitance
-  
+
+  Delegates to the C++ implementation (netlist_utils.pin_properties) when
+  the compiled extension is available; otherwise falls back to pure Python.
+
   Args:
-    dbpin: OpenDB pin object (ITerm) to query
-    clk_period: Clock period for normalization (ns, from `get_property period`)
-    ord_design: OpenROAD Design object
-    timing: OpenROAD Timing object (OpenSTA)
-    
+    dbpin      : OpenDB ITerm (output pin)
+    clk_period : Clock period in nanoseconds
+    ord_design : OpenROAD Design object (unused, kept for API parity)
+    timing     : OpenROAD Timing object
+
   Returns:
-    tuple: (slack, slew, load) — slack in ns (clamped to [-0.5*clk_period, ∞]),
-           normalized for use in graph node features as (slack / clk_period)
+    (slack_ns, slew, load)
   """
+  if _USE_CPP:
+    return _netlist_utils_cpp.pin_properties(dbpin, clk_period, ord_design, timing)
+
+  # ---- Pure-Python fallback -----------------------------------------------
   ITerms = dbpin.getNet().getITerms()
-  
-  # Get slack from OpenROAD timing engine (OpenSTA)
-  # slack = required_time - arrival_time (negative means timing violation)
-  # Query both rise and fall slack, take the worst (minimum).
-  # NOTE: Timing.getPinSlack() returns raw OpenSTA internal time in SECONDS.
-  # avg_clk_period (and all downstream normalization) is in NANOSECONDS
-  # (from `get_property period` which respects `set_cmd_units -time ns`).
-  # Multiply by 1e9 to convert s → ns so units are consistent.
   slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max),
               timing.getPinSlack(dbpin, timing.Rise, timing.Max)) * 1e9
-  # if slack < -0.5*clk_period:
-  #   slack = -0.5*clk_period  # clamp to bound, do NOT zero out (zeroing hides violations)
-  
-  # Get slew (transition time) from OpenROAD timing engine
-  slew = timing.getPinSlew(dbpin)  
-  
-  # Calculate total load capacitance driven by this pin
-  # Sum up input capacitances of all fanout pins across all timing corners
+  slew = timing.getPinSlew(dbpin)
   load = 0
   for ITerm in ITerms:
     if ITerm.isInputSignal():
       new_load = 0
-      # Check all timing corners (e.g., fast, typical, slow) and use max load
       for corner in timing.getCorners():
         tmp_load = timing.getPortCap(ITerm, corner, timing.Max)
         if tmp_load > new_load:
           new_load = tmp_load
       load += new_load
-
   return slack, slew, load
 
 def min_slack(dbpin, timing):
-  # Returns min slack in NANOSECONDS (getPinSlack is in seconds internally; *1e9 converts)
-  slack = min(timing.getPinSlack(dbpin, timing.Fall, timing.Max),
-              timing.getPinSlack(dbpin, timing.Rise, timing.Max)) * 1e9
-  return slack
+  """Returns the min-of-rise/fall Max slack in nanoseconds.
+  Delegates to C++ when available."""
+  if _USE_CPP:
+    return _netlist_utils_cpp.min_slack(dbpin, timing)
+  # Pure-Python fallback
+  return min(timing.getPinSlack(dbpin, timing.Fall, timing.Max),
+             timing.getPinSlack(dbpin, timing.Rise, timing.Max)) * 1e9
 
 def generate_masked_actions(graph):
   # Mask actions based on current cell configuration
@@ -492,13 +511,13 @@ def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
   new_loads = torch.zeros(len(episode_inst_dict.keys()))
 
   for n, inst in inst_names.items():
-    old_slacks[n] = episode_inst_dict[inst]['slack']
+    old_slacks[n] = _safe_f32(episode_inst_dict[inst]['slack'])
     tmp_db_pin = block.findITerm(inst+cell_dict[str(episode_inst_dict[inst]['cell_type'][0])]['out_pin'])
     if tmp_db_pin.getNet() != None:
       (episode_inst_dict[inst]['slack'],
       episode_inst_dict[inst]['slew'],
       episode_inst_dict[inst]['load']) = pin_properties(tmp_db_pin, clk_period, ord_design, timing)
-      new_slacks[n] = episode_inst_dict[inst]['slack']
+      new_slacks[n] = _safe_f32(episode_inst_dict[inst]['slack'])
       new_slews[n] = episode_inst_dict[inst]['slew']
       new_loads[n] = episode_inst_dict[inst]['load']
   episode_G.ndata['slack'] = new_slacks.to(device)/norm_data['clk_period']
@@ -509,7 +528,7 @@ def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
   episode_G.ndata['slew'] = new_slews.to(device)/ norm_data['max_slew']
   episode_G.ndata['load'] = new_loads.to(device)/ norm_data['max_load']
 
-  next_state[:,-2] = torch.tensor([episode_inst_dict[inst_names[x.item()]]['slack']
+  next_state[:,-2] = torch.tensor([_safe_f32(episode_inst_dict[inst_names[x.item()]]['slack'])
                                    for x in graph.ndata['_ID']])\
                                   / norm_data['clk_period']
   next_state[:,-3] = torch.tensor([episode_inst_dict[inst_names[x.item()]]['slew']
@@ -536,8 +555,8 @@ def env_step(episode_G, graph, state, action, clk_period, ord_design, timing,\
     reward += (new_endpoint_tns - old_endpoint_tns)
   else:
     # Fallback: full-graph slack delta when no endpoint list provided
-    new_TNS = torch.sum(torch.min(episode_G.ndata['slack'].to('cpu') * norm_data['clk_period'],
-                                  torch.zeros(episode_G.num_nodes())))
+    new_TNS = torch.sum(torch.min(episode_G.ndata['slack'].to(device) * norm_data['clk_period'],
+                                  torch.zeros(episode_G.num_nodes(), device=device)))
     old_TNS = torch.sum(torch.min(old_slacks, torch.zeros_like(old_slacks)))
     reward += (new_TNS - old_TNS).item()
 
@@ -594,7 +613,7 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
       (episode_inst_dict[inst]['slack'],
       episode_inst_dict[inst]['slew'],
       episode_inst_dict[inst]['load']) = pin_properties(tmp_db_pin, clk_period, ord_design, timing)
-      new_slacks[n] = episode_inst_dict[inst]['slack']
+      new_slacks[n] = _safe_f32(episode_inst_dict[inst]['slack'])
       new_slews[n] = episode_inst_dict[inst]['slew']
       new_loads[n] = episode_inst_dict[inst]['load']
   episode_G.ndata['slack'] = new_slacks.to(device)/norm_data['clk_period']
@@ -608,10 +627,10 @@ def env_reset(reset_state = None, episode_num = None, cell_name_dict = None,\
   return episode_G, episode_inst_dict
 
 
-def calc_cost(ep_G, Slack_Lambda):
+def calc_cost(ep_G, Slack_Lambda, device):
   # cost = torch.sum(ep_G.ndata['area'].to('cpu'))
   cost = 0
-  x = ep_G.ndata['slack'].to('cpu')
+  x = ep_G.ndata['slack'].to(device)
   new_slacks = torch.min(x, torch.zeros_like(x))
   cost += torch.sum(Slack_Lambda*(-new_slacks))
   return cost
@@ -672,16 +691,16 @@ design = 'pid'
 semi_opt_clk = '0.65'
 clock_name = "i_clk"
 n_features = 4
-BATCH_SIZE = 64#128
+BATCH_SIZE = 128
 GAMMA = 0.99
 EPS_START = 0.99
 EPS_END = 0.05
 EPS_DECAY = 200
-LR = 0.001
+LR = 0.005
 BUF_SIZE = 1500#10000
-STOP_BADS = 50
-MAX_STEPS = 50#150#200 c432#51#300
-TARGET_UPDATE = MAX_STEPS*25 #MAX_STEPS*5
+STOP_BADS = 20
+MAX_STEPS = 30#150#200 c432#51#300
+TARGET_UPDATE = MAX_STEPS*15 #MAX_STEPS*5
 EPISODE = 30 #150 # c880 #50 c432 #15#200
 LOADTH = 0
 DELTA = 0.000001
@@ -785,11 +804,11 @@ def load_ISPD_design(input_dir, platform_dir, output_dir, top_module):
   ord_design.evalTclString("set_cmd_units -time ns -capacitance pF -current mA -voltage V -resistance kOhm -distance um -power mW")
   ord_design.evalTclString("set_units -power mW")
   
-  ERC_fix_start_time = time()
-  print("=== Running ERC fix ===")
-  ord_design.evalTclString("estimate_parasitics -placement")
-  ord_design.evalTclString("repair_design")
-  print(time() - ERC_fix_start_time, "seconds for ERC fix")
+  # ERC_fix_start_time = time()
+  # print("=== Running ERC fix ===")
+  # ord_design.evalTclString("estimate_parasitics -placement")
+  # ord_design.evalTclString("repair_design")
+  # print(time() - ERC_fix_start_time, "seconds for ERC fix")
 
   # print("=== Running timing repair ===")
   # timing_fix_start_time = time()
@@ -1064,6 +1083,9 @@ def build_cell_dict_from_openroad(db, timing):
 def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell_name_dict, clk_period):
   """
   Traverses the netlist and extracts circuit properties from OpenROAD to build a graph.
+
+  Delegates to the C++ implementation (netlist_utils.iterate_nets) when the
+  compiled extension is available; otherwise falls back to the pure-Python loop.
   
   How data is obtained from OpenROAD:
   1. Iterates through all nets using block.getNets()
@@ -1084,13 +1106,23 @@ def iterate_nets_get_properties(ord_design, timing, nets, block, cell_dict, cell
     clk_period: Clock period for normalization (ns)
     
   Returns:
-    tuple: (inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict)
+    tuple: (inst_dict, endpoints, srcs, dsts, fanin_dict, fanout_dict, endpoint_iterms)
            - inst_dict: Properties of all instances (slack, slew, load, area)
            - endpoints: List of endpoint nodes (flip-flops)
            - srcs, dsts: Graph connectivity (source and destination indices)
            - fanin_dict, fanout_dict: Fanin/fanout relationships
+           - endpoint_iterms: ITerm name strings for FF data-input pins
   """
-  #This must eventually be put into a create graph function.
+  # ------------------------------------------------------------------
+  # C++ fast path
+  # ------------------------------------------------------------------
+  if _USE_CPP:
+    return _netlist_utils_cpp.iterate_nets(
+        ord_design, timing, nets, block, cell_dict, cell_name_dict, clk_period)
+
+  # ------------------------------------------------------------------
+  # Pure-Python fallback
+  # ------------------------------------------------------------------
   #source and destination instances for the graph function.
   srcs = []
   dsts = []

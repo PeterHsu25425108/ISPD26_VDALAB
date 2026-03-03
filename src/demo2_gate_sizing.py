@@ -182,7 +182,7 @@ n_state= n_cells+n_features
 ###############################################################
 #Give an intial solution proportionaly to the original slacks.#
 ###############################################################
-Slack_Lambda = 1-G.ndata['slack'].to('cpu')
+Slack_Lambda = 1-G.ndata['slack'].to(device)
 #############################################################################
 #Create the target and policy nets and ensure that they have the same value.#
 #############################################################################
@@ -239,7 +239,7 @@ else:
 
 pareto_points = []
 pareto_cells  = []
-best_cost = calc_cost(episode_G, Slack_Lambda)
+best_cost = calc_cost(episode_G, Slack_Lambda, device)
 reset_state = get_state_cells(episode_inst_dict, inst_names, cell_dict)
 data_v_episode = []
 ################
@@ -254,7 +254,7 @@ for i_episode in range(num_episodes):
   ######################################
   episode_G, episode_inst_dict = env_reset(reset_state, i_episode,\
     cell_name_dict, avg_clk_period, ord_design, timing, G, inst_dict, inst_names, block, cell_dict, norm_data, device)
-  best_cost = calc_cost(episode_G, Slack_Lambda)
+  best_cost = calc_cost(episode_G, Slack_Lambda, device)
   cumulative_reward = 0
   count_bads = 0
   ############################
@@ -296,7 +296,7 @@ for i_episode in range(num_episodes):
       #######
       #reset#
       #######
-      cost = calc_cost(episode_G, Slack_Lambda)
+      cost = calc_cost(episode_G, Slack_Lambda, device)
       if cost<best_cost:
         best_cost = cost
         reset_state = get_state_cells(episode_inst_dict, inst_names, cell_dict)
@@ -333,10 +333,10 @@ for i_episode in range(num_episodes):
     #########################################
     #stop this episode if it's getting worse#
     #########################################
-    #if count_bads >= STOP_BADS:
-    #  print("Stopping bad actions")
-    #  count_bads = 0
-    #  done = 1
+    if count_bads >= STOP_BADS:
+     print("Stopping bad actions")
+     count_bads = 0
+     done = 1
     
     cumulative_reward += reward
     if done:
@@ -356,7 +356,7 @@ for i_episode in range(num_episodes):
 
     if next_state != None:
       # Compute WNS from the full updated timing graph (episode_G), de-normalized to ns.
-      _g_slack_ns = episode_G.ndata['slack'].to('cpu') * norm_data['clk_period']
+      _g_slack_ns = episode_G.ndata['slack'].to(device) * norm_data['clk_period']
       current_WNS = torch.min(_g_slack_ns).item()
       # Compute TNS on endpoints only (matches OpenROAD report_tns units = ns)
       current_TNS = compute_endpoint_tns_ns(block, timing, endpoint_iterms)
@@ -376,7 +376,7 @@ for i_episode in range(num_episodes):
       if(ret == 1):
         l= len(pareto_points)
         slacks = [min_slack(block.findITerm(x + cell_dict[str(inst_dict[x]['cell_type'][0])]['out_pin']), timing) for x in inst_names.values()]
-      cost = calc_cost(episode_G, Slack_Lambda)
+      cost = calc_cost(episode_G, Slack_Lambda, device)
       if cost<best_cost:
         best_cost = cost
         reset_state = get_state_cells(episode_inst_dict, inst_names, cell_dict)
@@ -390,7 +390,7 @@ for i_episode in range(num_episodes):
       current_TNS = 0.0
 
     if t%10 == 9 :
-      Slack_Lambda = update_lambda(Slack_Lambda, episode_G.ndata['slack'].to('cpu'), K)
+      Slack_Lambda = update_lambda(Slack_Lambda, episode_G.ndata['slack'].to(device), K)
     ############
     #output log#
     ############
@@ -472,6 +472,16 @@ print(time() - restore_start_time, "seconds for restoring best-known configurati
 # ord_design.evalTclString("report_wns")
 
 dp_start_time = time()
+print("=== Running global placement ===")
+# Run global placement to legalize the design after gate sizing
+ord_design.evalTclString("global_placement")
+# Re-estimate parasitics after placement (wire lengths changed) before querying timing
+ord_design.evalTclString("estimate_parasitics -placement")
+print(time() - dp_start_time, "seconds for global placement")
+print("Post GP WNS and TNS:")
+ord_design.evalTclString("report_tns")
+ord_design.evalTclString("report_wns")
+
 print("=== Running detailed placement ===")
 # Run detailed placement to legalize the design after gate sizing
 # site = ord_design.getBlock().getRows()[0].getSite()

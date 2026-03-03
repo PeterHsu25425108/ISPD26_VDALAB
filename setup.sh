@@ -113,6 +113,21 @@ echo "Installing remaining packages..."
 echo "Installing snakeviz for profiling (optional)..."
 /usr/bin/pip3 install --break-system-packages --no-cache-dir snakeviz
 
+echo "Installing pybind11 (required for C++ netlist_utils extension)..."
+/usr/bin/pip3 install --break-system-packages --no-cache-dir pybind11
+
+# ---------------------------------------------------------------------------
+# Build the C++/pybind11 netlist acceleration module
+# ---------------------------------------------------------------------------
+echo ""
+echo "[3b/4] Building C++/pybind11 netlist_utils acceleration module..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if python3 "${SCRIPT_DIR}/src/netlist_utils/setup_netlist_utils.py" 2>&1; then
+    echo "✓ netlist_utils compiled successfully -> src/netlist_utils/netlist_utils.cpython-*.so"
+else
+    echo "⚠ netlist_utils compilation failed (pure-Python fallback will be used)"
+fi
+
 # Clean pip cache in root after installation
 rm -rf /root/.cache/pip 2>/dev/null || true
 
